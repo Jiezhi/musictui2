@@ -1,0 +1,26 @@
+[package]
+name = "musictui2"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+description = "A terminal-based music player with GitHub integration"
+license = "MIT"
+repository = "https://github.com/yourusername/musictui2"
+readme = "README.md"
+keywords = ["music", "terminal", "tui", "player", "github"]
+categories = ["multimedia", "command-line-utilities"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tokio = { version = "1.40", features = ["full"] }
+ratatui = "0.28"
+rodio = "0.19"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+crossterm = "0.28"
+sha2 = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"
+tempfile = "3.0"
