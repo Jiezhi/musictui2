@@ -58,12 +58,12 @@ impl Cli {
         repo_identifier: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if let Ok(id) = repo_identifier.parse::<i64>() {
-            self.database.delete_repository(id)?;
+            self.github_scanner.delete_repository(id)?;
             return Ok(());
         }
 
         let (owner, repo_name) = parse_repository_url(repo_identifier)?;
-        self.database
+        self.github_scanner
             .delete_repository_by_name(&owner, &repo_name)?;
 
         Ok(())

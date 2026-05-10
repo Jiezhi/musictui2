@@ -90,11 +90,16 @@ musictui2 list-tracks
 
 ## TUI Controls
 
-- `Tab`: switch tabs
-- `j` / `Down`: move down in the track list
-- `k` / `Up`: move up in the track list
+- `Tab` / `Shift+Tab` or `n` / `p`: switch tabs
+- `j` / `Down`: move down in the active list
+- `k` / `Up`: move up in the active list
+- `PageUp` / `PageDown` or `Ctrl+B` / `Ctrl+F`: page through the Tracks tab
 - `Enter`: play the selected track
 - `Space`: play or pause
+- `m`: switch between sequential and shuffle playback in the Tracks tab
+- `.` / `,`: play the next or previous track in the Tracks tab
+- `d`: delete the selected repository from the Repositories tab; press `d` again to confirm
+- `Esc`: cancel a pending repository delete confirmation
 - `+` / `-`: adjust volume
 - `q`: quit
 

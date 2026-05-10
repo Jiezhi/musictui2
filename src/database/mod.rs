@@ -189,12 +189,6 @@ impl DatabaseManager {
         Ok(())
     }
 
-    pub fn delete_repository_by_name(&self, owner: &str, name: &str) -> Result<()> {
-        let repository = self.get_repository_by_name(owner, name)?;
-        self.delete_repository(repository.id)?;
-        Ok(())
-    }
-
     pub fn save_track(&self, track: &Track) -> Result<()> {
         let conn = self.connection.lock().unwrap();
         let duration_secs = track.duration.map(|d| d.as_secs() as i64);
@@ -546,5 +540,48 @@ mod tests {
         let tracks = db.get_tracks_by_repo(saved_repository.id).unwrap();
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].size, 2048);
+    }
+
+    #[test]
+    fn deleting_repository_removes_tracks() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("music.db");
+        let db = DatabaseManager::from_path(&db_path).unwrap();
+
+        let repository = Repository {
+            id: 0,
+            owner: "owner".to_string(),
+            name: "repo".to_string(),
+            url: "https://github.com/owner/repo".to_string(),
+            added_at: Utc::now(),
+            last_scanned: None,
+            track_count: 0,
+        };
+
+        db.save_repository(&repository).unwrap();
+        let saved_repository = db.get_repository_by_name("owner", "repo").unwrap();
+
+        let track = Track {
+            id: 0,
+            repository_id: saved_repository.id,
+            path: "song.mp3".to_string(),
+            name: "song.mp3".to_string(),
+            format: "mp3".to_string(),
+            size: 1024,
+            duration: None,
+            url: "https://example.com/song.mp3".to_string(),
+            local_path: None,
+            downloaded: false,
+            discovered_at: Utc::now(),
+        };
+
+        db.save_track(&track).unwrap();
+        db.delete_repository(saved_repository.id).unwrap();
+
+        assert!(db
+            .get_tracks_by_repo(saved_repository.id)
+            .unwrap()
+            .is_empty());
+        assert!(db.get_repository_by_name("owner", "repo").is_err());
     }
 }

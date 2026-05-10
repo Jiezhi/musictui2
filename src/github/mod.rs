@@ -354,6 +354,29 @@ impl GitHubScanner {
         Ok(local_path)
     }
 
+    pub fn delete_repository(
+        &self,
+        repository_id: i64,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        let tracks = self.database.get_tracks_by_repo(repository_id)?;
+
+        for track in &tracks {
+            self.cache.remove(&track.url)?;
+        }
+
+        self.database.delete_repository(repository_id)?;
+        Ok(tracks.len())
+    }
+
+    pub fn delete_repository_by_name(
+        &self,
+        owner: &str,
+        name: &str,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        let repository = self.database.get_repository_by_name(owner, name)?;
+        self.delete_repository(repository.id)
+    }
+
     pub fn start_streaming_download(
         &self,
         track: Track,

@@ -12,7 +12,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Row, Table, TableState, Tabs},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Row, Table, TableState, Tabs},
     Frame, Terminal,
 };
 use std::io;
@@ -40,11 +40,35 @@ struct DrawData<'a> {
     repositories: &'a Vec<Repository>,
     tracks: &'a Vec<Track>,
     selected_tab: usize,
+    current_repository_index: Option<usize>,
     current_track_index: Option<usize>,
     caching_track_index: Option<usize>,
     playback_state: &'a PlaybackState,
+    playback_mode: PlaybackMode,
     current_track: Option<&'a Track>,
     status_message: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlaybackMode {
+    Sequential,
+    Shuffle,
+}
+
+impl PlaybackMode {
+    fn next(self) -> Self {
+        match self {
+            Self::Sequential => Self::Shuffle,
+            Self::Shuffle => Self::Sequential,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Sequential => "Sequential",
+            Self::Shuffle => "Shuffle",
+        }
+    }
 }
 
 struct PendingPlayback {
@@ -165,6 +189,43 @@ fn previous_track_index(current: Option<usize>, len: usize, step: usize) -> Opti
     Some(current.saturating_sub(step.max(1)))
 }
 
+fn next_repository_index(current: Option<usize>, len: usize) -> Option<usize> {
+    next_track_index(current, len, 1)
+}
+
+fn previous_repository_index(current: Option<usize>, len: usize) -> Option<usize> {
+    previous_track_index(current, len, 1)
+}
+
+fn sequential_autoplay_index(current: Option<usize>, len: usize) -> Option<usize> {
+    let current = current?;
+
+    if current + 1 < len {
+        Some(current + 1)
+    } else {
+        None
+    }
+}
+
+fn shuffle_autoplay_index(current: Option<usize>, len: usize, seed: &mut u64) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+
+    if len == 1 {
+        return Some(0);
+    }
+
+    *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+    let mut index = ((*seed >> 32) as usize) % len;
+
+    if Some(index) == current {
+        index = (index + 1) % len;
+    }
+
+    Some(index)
+}
+
 fn tracks_table(data: &DrawData<'_>) -> Table<'static> {
     let rows: Vec<Row<'static>> = data
         .tracks
@@ -227,6 +288,26 @@ mod tests {
         assert_eq!(previous_track_index(Some(2), 10, 0), Some(1));
         assert_eq!(previous_track_index(Some(0), 0, 5), None);
     }
+
+    #[test]
+    fn sequential_autoplay_stops_at_end() {
+        assert_eq!(sequential_autoplay_index(Some(0), 3), Some(1));
+        assert_eq!(sequential_autoplay_index(Some(2), 3), None);
+        assert_eq!(sequential_autoplay_index(None, 3), None);
+    }
+
+    #[test]
+    fn shuffle_autoplay_avoids_current_track_when_possible() {
+        let mut seed = 1;
+        for current in 0..5 {
+            assert_ne!(
+                shuffle_autoplay_index(Some(current), 5, &mut seed),
+                Some(current)
+            );
+        }
+        assert_eq!(shuffle_autoplay_index(Some(0), 1, &mut seed), Some(0));
+        assert_eq!(shuffle_autoplay_index(Some(0), 0, &mut seed), None);
+    }
 }
 
 pub struct App {
@@ -234,10 +315,15 @@ pub struct App {
     selected_tab: usize,
     repositories: Vec<Repository>,
     tracks: Vec<Track>,
+    repositories_list_state: ListState,
     tracks_table_state: TableState,
     tracks_page_step: usize,
     audio_player: AudioPlayer,
+    current_repository_index: Option<usize>,
     current_track_index: Option<usize>,
+    playback_mode: PlaybackMode,
+    shuffle_seed: u64,
+    pending_repository_delete: Option<usize>,
     #[allow(dead_code)]
     event_bus: EventBus,
     database: Arc<DatabaseManager>,
@@ -256,16 +342,25 @@ impl App {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let terminal = None;
         let audio_player = AudioPlayer::with_github_scanner(github_scanner.clone())?;
+        let shuffle_seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos() as u64)
+            .unwrap_or(0x05ee_d5ee_dd15_ca11_u64);
 
         Ok(Self {
             terminal,
             selected_tab: 0,
             repositories: Vec::new(),
             tracks: Vec::new(),
+            repositories_list_state: ListState::default(),
             tracks_table_state: TableState::default(),
             tracks_page_step: DEFAULT_TRACKS_PAGE_STEP,
             audio_player,
+            current_repository_index: None,
             current_track_index: None,
+            playback_mode: PlaybackMode::Sequential,
+            shuffle_seed,
+            pending_repository_delete: None,
             event_bus,
             database,
             github_scanner,
@@ -312,16 +407,19 @@ impl App {
                 repositories: &self.repositories,
                 tracks: &self.tracks,
                 selected_tab: self.selected_tab,
+                current_repository_index: self.current_repository_index,
                 current_track_index: self.current_track_index,
                 caching_track_index: self
                     .pending_playback
                     .as_ref()
                     .map(|pending| pending.track_index),
                 playback_state: self.audio_player.get_playback_state(),
+                playback_mode: self.playback_mode,
                 current_track: self.audio_player.get_current_track(),
                 status_message: &self.status_message,
             };
 
+            let repositories_list_state = &mut self.repositories_list_state;
             let tracks_table_state = &mut self.tracks_table_state;
             let tracks_page_step = &mut self.tracks_page_step;
 
@@ -372,8 +470,11 @@ impl App {
                                 .collect();
                             let list = List::new(items).block(
                                 Block::default().title("Repositories").borders(Borders::ALL),
-                            );
-                            f.render_widget(list, chunks[2]);
+                            )
+                            .highlight_style(Style::default().fg(Color::Yellow))
+                            .highlight_symbol("> ");
+                            repositories_list_state.select(draw_data.current_repository_index);
+                            f.render_stateful_widget(list, chunks[2], repositories_list_state);
                         }
                         1 => {
                             tracks_table_state.select(draw_data.current_track_index);
@@ -403,8 +504,9 @@ impl App {
                     }
 
                     let help_text = format!(
-                        "{} | Tab: Switch | ↑↓/jk: Navigate | PgUp/PgDn/Ctrl+B/Ctrl+F: Page | Enter: Play | Space: Play/Pause | +/-: Volume | q: Quit",
-                        draw_data.status_message
+                        "{} | Mode: {} | Tab: Switch | ↑↓/jk: Navigate | PgUp/PgDn/Ctrl+B/Ctrl+F: Page | Enter: Play | Space: Play/Pause | m: Mode | ,/.: Prev/Next | d: Delete repo | +/-: Volume | q: Quit",
+                        draw_data.status_message,
+                        draw_data.playback_mode.label()
                     );
                     let help = Paragraph::new(help_text).style(Style::default().fg(Color::Gray));
                     f.render_widget(help, chunks[3]);
@@ -420,61 +522,93 @@ impl App {
     fn load_data(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.repositories = self.database.get_repositories()?;
         self.tracks = self.database.get_all_tracks()?;
+        self.select_repository_index(self.current_repository_index);
         self.select_track_index(self.current_track_index);
         Ok(())
     }
 
     async fn handle_key_event(&mut self, key: KeyEvent) -> Result<(), Box<dyn std::error::Error>> {
         match key.code {
+            KeyCode::Esc => {
+                self.pending_repository_delete = None;
+                self.status_message = "Ready".to_string();
+            }
             KeyCode::Char('q') => {
                 self.should_quit = true;
             }
             KeyCode::Char('n') => {
                 self.selected_tab = (self.selected_tab + 1) % 3;
+                self.pending_repository_delete = None;
             }
             KeyCode::Char('p') => {
                 self.selected_tab = (self.selected_tab + 3 - 1) % 3;
+                self.pending_repository_delete = None;
             }
             KeyCode::Tab => {
                 self.selected_tab = (self.selected_tab + 1) % 3;
+                self.pending_repository_delete = None;
             }
             KeyCode::BackTab => {
                 self.selected_tab = (self.selected_tab + 3 - 1) % 3;
+                self.pending_repository_delete = None;
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 if self.selected_tab == 0 {
-                    // Navigate repositories - not implemented yet
+                    self.select_previous_repository();
                 } else if self.selected_tab == 1 {
                     self.select_previous_track(1);
                 }
+                self.pending_repository_delete = None;
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if self.selected_tab == 0 {
-                    // Navigate repositories - not implemented yet
+                    self.select_next_repository();
                 } else if self.selected_tab == 1 {
                     self.select_next_track(1);
                 }
+                self.pending_repository_delete = None;
             }
             KeyCode::PageUp if self.selected_tab == 1 => {
                 self.select_previous_track(self.tracks_page_step);
+                self.pending_repository_delete = None;
             }
             KeyCode::PageDown if self.selected_tab == 1 => {
                 self.select_next_track(self.tracks_page_step);
+                self.pending_repository_delete = None;
             }
             KeyCode::Char('b')
                 if self.selected_tab == 1 && key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.select_previous_track(self.tracks_page_step);
+                self.pending_repository_delete = None;
             }
             KeyCode::Char('f')
                 if self.selected_tab == 1 && key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.select_next_track(self.tracks_page_step);
+                self.pending_repository_delete = None;
+            }
+            KeyCode::Char('m') if self.selected_tab == 1 => {
+                self.playback_mode = self.playback_mode.next();
+                self.status_message = format!("Playback mode: {}", self.playback_mode.label());
+                self.pending_repository_delete = None;
+            }
+            KeyCode::Char('.') if self.selected_tab == 1 && !self.tracks.is_empty() => {
+                self.play_next_track()?;
+                self.pending_repository_delete = None;
+            }
+            KeyCode::Char(',') if self.selected_tab == 1 && !self.tracks.is_empty() => {
+                self.play_previous_track()?;
+                self.pending_repository_delete = None;
             }
             KeyCode::Enter if self.selected_tab == 1 && !self.tracks.is_empty() => {
                 if let Some(index) = self.current_track_index {
                     self.queue_track(index)?;
                 }
+                self.pending_repository_delete = None;
+            }
+            KeyCode::Char('d') if self.selected_tab == 0 => {
+                self.confirm_or_delete_selected_repository()?;
             }
             KeyCode::Char(' ') => {
                 if self.audio_player.is_playing() {
@@ -485,14 +619,17 @@ impl App {
                         self.queue_track(index)?;
                     }
                 }
+                self.pending_repository_delete = None;
             }
             KeyCode::Char('+') => {
                 let new_volume = (self.audio_player.get_volume() + 0.1).min(1.0);
                 self.audio_player.set_volume(new_volume)?;
+                self.pending_repository_delete = None;
             }
             KeyCode::Char('-') => {
                 let new_volume = (self.audio_player.get_volume() - 0.1).max(0.0);
                 self.audio_player.set_volume(new_volume)?;
+                self.pending_repository_delete = None;
             }
             _ => {}
         }
@@ -551,6 +688,10 @@ impl App {
     async fn on_tick(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(pending) = self.pending_playback.take() {
             self.handle_pending_playback(pending).await?;
+        }
+
+        if self.audio_player.has_finished() {
+            self.handle_track_finished()?;
         } else if self.audio_player.is_playing() {
             if let Some(track) = self.audio_player.get_current_track() {
                 self.status_message = format!("Playing {}", track.name);
@@ -672,6 +813,14 @@ impl App {
         self.tracks_table_state.select(index);
     }
 
+    fn select_repository_index(&mut self, index: Option<usize>) {
+        let index = index
+            .filter(|_| !self.repositories.is_empty())
+            .map(|index| index.min(self.repositories.len() - 1));
+        self.current_repository_index = index;
+        self.repositories_list_state.select(index);
+    }
+
     fn select_next_track(&mut self, step: usize) {
         let index = next_track_index(self.current_track_index, self.tracks.len(), step);
         self.select_track_index(index);
@@ -680,6 +829,145 @@ impl App {
     fn select_previous_track(&mut self, step: usize) {
         let index = previous_track_index(self.current_track_index, self.tracks.len(), step);
         self.select_track_index(index);
+    }
+
+    fn select_next_repository(&mut self) {
+        let index = next_repository_index(self.current_repository_index, self.repositories.len());
+        self.select_repository_index(index);
+    }
+
+    fn select_previous_repository(&mut self) {
+        let index =
+            previous_repository_index(self.current_repository_index, self.repositories.len());
+        self.select_repository_index(index);
+    }
+
+    fn play_next_track(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let current = self.playing_track_index().or(self.current_track_index);
+        if let Some(index) = self.next_playback_index_from(current, true) {
+            self.queue_track(index)?;
+        }
+
+        Ok(())
+    }
+
+    fn play_previous_track(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let current = self.playing_track_index().or(self.current_track_index);
+        let index = previous_track_index(current, self.tracks.len(), 1);
+        if let Some(index) = index {
+            self.queue_track(index)?;
+        }
+
+        Ok(())
+    }
+
+    fn handle_track_finished(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let finished_track_name = self
+            .audio_player
+            .get_current_track()
+            .map(|track| track.name.clone())
+            .unwrap_or_else(|| "Track".to_string());
+        let finished_index = self.playing_track_index();
+
+        self.audio_player.stop()?;
+
+        if let Some(index) = self.next_playback_index_from(finished_index, false) {
+            self.queue_track(index)?;
+        } else {
+            self.status_message = format!("{finished_track_name} finished");
+        }
+
+        Ok(())
+    }
+
+    fn next_playback_index_from(
+        &mut self,
+        current: Option<usize>,
+        wrap_sequential: bool,
+    ) -> Option<usize> {
+        match self.playback_mode {
+            PlaybackMode::Sequential => {
+                let next = sequential_autoplay_index(current, self.tracks.len());
+                if next.is_none() && wrap_sequential && !self.tracks.is_empty() {
+                    Some(0)
+                } else {
+                    next
+                }
+            }
+            PlaybackMode::Shuffle => {
+                shuffle_autoplay_index(current, self.tracks.len(), &mut self.shuffle_seed)
+            }
+        }
+    }
+
+    fn playing_track_index(&self) -> Option<usize> {
+        let current_track_id = self.audio_player.get_current_track()?.id;
+        self.tracks
+            .iter()
+            .position(|track| track.id == current_track_id)
+    }
+
+    fn confirm_or_delete_selected_repository(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(index) = self.current_repository_index else {
+            self.status_message = "No repository selected".to_string();
+            return Ok(());
+        };
+
+        let Some(repository) = self.repositories.get(index).cloned() else {
+            self.select_repository_index(None);
+            self.status_message = "No repository selected".to_string();
+            return Ok(());
+        };
+
+        if self.pending_repository_delete != Some(index) {
+            self.pending_repository_delete = Some(index);
+            self.status_message = format!(
+                "Press d again to delete {}/{} and its tracks/cache",
+                repository.owner, repository.name
+            );
+            return Ok(());
+        }
+
+        self.delete_repository(repository)?;
+        self.pending_repository_delete = None;
+        Ok(())
+    }
+
+    fn delete_repository(
+        &mut self,
+        repository: Repository,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let repository_id = repository.id;
+
+        if let Some(pending) = self.pending_playback.take() {
+            if pending.track.repository_id == repository_id {
+                pending.cancel();
+            } else {
+                self.pending_playback = Some(pending);
+            }
+        }
+
+        if self
+            .audio_player
+            .get_current_track()
+            .is_some_and(|track| track.repository_id == repository_id)
+        {
+            self.audio_player.stop()?;
+        }
+
+        let deleted_tracks = self.github_scanner.delete_repository(repository_id)?;
+
+        self.repositories.retain(|repo| repo.id != repository_id);
+        self.tracks
+            .retain(|track| track.repository_id != repository_id);
+        self.select_repository_index(self.current_repository_index);
+        self.select_track_index(self.current_track_index);
+        self.status_message = format!(
+            "Deleted {}/{} with {} tracks/cache entries",
+            repository.owner, repository.name, deleted_tracks
+        );
+
+        Ok(())
     }
 
     #[allow(dead_code)]

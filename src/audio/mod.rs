@@ -195,6 +195,11 @@ impl AudioPlayer {
         matches!(self.playback_state, PlaybackState::Paused)
     }
 
+    pub fn has_finished(&self) -> bool {
+        matches!(self.playback_state, PlaybackState::Playing)
+            && self.sink.as_ref().is_some_and(Sink::empty)
+    }
+
     #[allow(dead_code)]
     pub fn get_progress(&self) -> Option<Duration> {
         // TODO: Implement progress tracking using rodio's position API
