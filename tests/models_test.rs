@@ -37,7 +37,7 @@ fn test_track_creation() {
 
     assert_eq!(track.id, 1);
     assert_eq!(track.name, "test-track.mp3");
-    assert_eq!(track.downloaded, false);
+    assert!(!track.downloaded);
     assert!(track.local_path.is_none());
 }
 

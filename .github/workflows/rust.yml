@@ -27,8 +27,12 @@ jobs:
         toolchain: ${{ matrix.rust }}
         components: rustfmt, clippy
 
+    - name: Install Linux audio dependencies
+      if: runner.os == 'Linux'
+      run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+
     - name: Cache cargo registry
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: |
           ~/.cargo/registry
@@ -58,8 +62,12 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
 
+    - name: Install Linux audio dependencies
+      if: runner.os == 'Linux'
+      run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+
     - name: Cache cargo registry
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: |
           ~/.cargo/registry
@@ -71,10 +79,12 @@ jobs:
       run: cargo build --release
 
     - name: Upload binaries
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: musictui2-${{ matrix.os }}
-        path: target/release/musictui2
+        path: |
+          target/release/musictui2
+          target/release/musictui2.exe
 
   coverage:
     name: Coverage
@@ -87,6 +97,9 @@ jobs:
       with:
         components: llvm-tools-preview
 
+    - name: Install Linux audio dependencies
+      run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+
     - name: Install cargo-llvm-cov
       uses: taiki-e/install-action@cargo-llvm-cov
 
@@ -94,7 +107,8 @@ jobs:
       run: cargo llvm-cov --lcov --output-path coverage.lcov
 
     - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v3
+      uses: codecov/codecov-action@v5
       with:
+        token: ${{ secrets.CODECOV_TOKEN }}
         file: ./coverage.lcov
         fail_ci_if_error: true

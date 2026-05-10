@@ -261,55 +261,6 @@ fn tracks_table(data: &DrawData<'_>) -> Table<'static> {
     .highlight_style(Style::default().fg(Color::Yellow))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn track_page_step_matches_visible_table_rows() {
-        assert_eq!(track_page_step_for_area(Rect::new(0, 0, 80, 20)), 17);
-        assert_eq!(track_page_step_for_area(Rect::new(0, 0, 80, 2)), 1);
-    }
-
-    #[test]
-    fn next_track_index_pages_and_clamps() {
-        assert_eq!(next_track_index(None, 10, 5), Some(0));
-        assert_eq!(next_track_index(Some(2), 10, 5), Some(7));
-        assert_eq!(next_track_index(Some(8), 10, 5), Some(9));
-        assert_eq!(next_track_index(Some(2), 10, 0), Some(3));
-        assert_eq!(next_track_index(Some(0), 0, 5), None);
-    }
-
-    #[test]
-    fn previous_track_index_pages_and_clamps() {
-        assert_eq!(previous_track_index(None, 10, 5), Some(0));
-        assert_eq!(previous_track_index(Some(7), 10, 5), Some(2));
-        assert_eq!(previous_track_index(Some(2), 10, 5), Some(0));
-        assert_eq!(previous_track_index(Some(2), 10, 0), Some(1));
-        assert_eq!(previous_track_index(Some(0), 0, 5), None);
-    }
-
-    #[test]
-    fn sequential_autoplay_stops_at_end() {
-        assert_eq!(sequential_autoplay_index(Some(0), 3), Some(1));
-        assert_eq!(sequential_autoplay_index(Some(2), 3), None);
-        assert_eq!(sequential_autoplay_index(None, 3), None);
-    }
-
-    #[test]
-    fn shuffle_autoplay_avoids_current_track_when_possible() {
-        let mut seed = 1;
-        for current in 0..5 {
-            assert_ne!(
-                shuffle_autoplay_index(Some(current), 5, &mut seed),
-                Some(current)
-            );
-        }
-        assert_eq!(shuffle_autoplay_index(Some(0), 1, &mut seed), Some(0));
-        assert_eq!(shuffle_autoplay_index(Some(0), 0, &mut seed), None);
-    }
-}
-
 pub struct App {
     terminal: Option<Terminal<CrosstermBackend<io::Stdout>>>,
     selected_tab: usize,
@@ -1101,4 +1052,53 @@ pub async fn run(event_bus: EventBus) -> Result<(), Box<dyn std::error::Error>> 
     let github_scanner = Arc::new(GitHubScanner::new(database.clone(), cache));
     let mut app = App::new(event_bus, database, github_scanner)?;
     app.run().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn track_page_step_matches_visible_table_rows() {
+        assert_eq!(track_page_step_for_area(Rect::new(0, 0, 80, 20)), 17);
+        assert_eq!(track_page_step_for_area(Rect::new(0, 0, 80, 2)), 1);
+    }
+
+    #[test]
+    fn next_track_index_pages_and_clamps() {
+        assert_eq!(next_track_index(None, 10, 5), Some(0));
+        assert_eq!(next_track_index(Some(2), 10, 5), Some(7));
+        assert_eq!(next_track_index(Some(8), 10, 5), Some(9));
+        assert_eq!(next_track_index(Some(2), 10, 0), Some(3));
+        assert_eq!(next_track_index(Some(0), 0, 5), None);
+    }
+
+    #[test]
+    fn previous_track_index_pages_and_clamps() {
+        assert_eq!(previous_track_index(None, 10, 5), Some(0));
+        assert_eq!(previous_track_index(Some(7), 10, 5), Some(2));
+        assert_eq!(previous_track_index(Some(2), 10, 5), Some(0));
+        assert_eq!(previous_track_index(Some(2), 10, 0), Some(1));
+        assert_eq!(previous_track_index(Some(0), 0, 5), None);
+    }
+
+    #[test]
+    fn sequential_autoplay_stops_at_end() {
+        assert_eq!(sequential_autoplay_index(Some(0), 3), Some(1));
+        assert_eq!(sequential_autoplay_index(Some(2), 3), None);
+        assert_eq!(sequential_autoplay_index(None, 3), None);
+    }
+
+    #[test]
+    fn shuffle_autoplay_avoids_current_track_when_possible() {
+        let mut seed = 1;
+        for current in 0..5 {
+            assert_ne!(
+                shuffle_autoplay_index(Some(current), 5, &mut seed),
+                Some(current)
+            );
+        }
+        assert_eq!(shuffle_autoplay_index(Some(0), 1, &mut seed), Some(0));
+        assert_eq!(shuffle_autoplay_index(Some(0), 0, &mut seed), None);
+    }
 }
