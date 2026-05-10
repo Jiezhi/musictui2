@@ -12,7 +12,9 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Row, Table, TableState, Tabs},
+    widgets::{
+        Block, Borders, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Tabs,
+    },
     Frame, Terminal,
 };
 use std::io;
@@ -46,7 +48,9 @@ struct DrawData<'a> {
     playback_state: &'a PlaybackState,
     playback_mode: PlaybackMode,
     current_track: Option<&'a Track>,
+    volume: f32,
     status_message: &'a str,
+    show_help: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -261,6 +265,73 @@ fn tracks_table(data: &DrawData<'_>) -> Table<'static> {
     .highlight_style(Style::default().fg(Color::Yellow))
 }
 
+fn playback_state_label(playback_state: &PlaybackState) -> &'static str {
+    match playback_state {
+        PlaybackState::Playing => "Playing",
+        PlaybackState::Paused => "Paused",
+        PlaybackState::Stopped => "Stopped",
+    }
+}
+
+fn volume_percent(volume: f32) -> u8 {
+    (volume.clamp(0.0, 1.0) * 100.0).round() as u8
+}
+
+fn footer_text(data: &DrawData<'_>) -> String {
+    format!(
+        "{} | Playback: {} | Mode: {} | Vol: {}% | ?: Shortcuts",
+        data.status_message,
+        playback_state_label(data.playback_state),
+        data.playback_mode.label(),
+        volume_percent(data.volume)
+    )
+}
+
+fn help_text() -> &'static str {
+    "?: Close shortcuts\n\
+Esc: Close shortcuts / cancel delete\n\
+Tab or n: Next tab\n\
+Shift+Tab or p: Previous tab\n\
+Up/Down or k/j: Move selection\n\
+PageUp/PageDown or Ctrl+B/Ctrl+F: Page tracks\n\
+Enter: Play selected track\n\
+Space: Play or pause\n\
+m: Toggle playback mode\n\
+, / .: Previous / next track\n\
+d: Delete selected repository (press twice)\n\
++ / -: Volume\n\
+q: Quit"
+}
+
+fn help_popup_area(area: Rect) -> Rect {
+    let width = area.width.saturating_sub(4).min(76).max(area.width.min(20));
+    let height = area
+        .height
+        .saturating_sub(2)
+        .min(15)
+        .max(area.height.min(3));
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+fn render_help_popup(f: &mut Frame<'_>, area: Rect) {
+    let popup_area = help_popup_area(area);
+    let popup = Paragraph::new(help_text())
+        .block(Block::default().title("Shortcuts").borders(Borders::ALL))
+        .style(Style::default().fg(Color::White))
+        .wrap(ratatui::widgets::Wrap { trim: false });
+
+    f.render_widget(Clear, popup_area);
+    f.render_widget(popup, popup_area);
+}
+
 pub struct App {
     terminal: Option<Terminal<CrosstermBackend<io::Stdout>>>,
     selected_tab: usize,
@@ -282,6 +353,7 @@ pub struct App {
     github_scanner: Arc<GitHubScanner>,
     pending_playback: Option<PendingPlayback>,
     status_message: String,
+    show_help: bool,
     should_quit: bool,
 }
 
@@ -317,6 +389,7 @@ impl App {
             github_scanner,
             pending_playback: None,
             status_message: "Ready".to_string(),
+            show_help: false,
             should_quit: false,
         })
     }
@@ -367,7 +440,9 @@ impl App {
                 playback_state: self.audio_player.get_playback_state(),
                 playback_mode: self.playback_mode,
                 current_track: self.audio_player.get_current_track(),
+                volume: self.audio_player.get_volume(),
                 status_message: &self.status_message,
+                show_help: self.show_help,
             };
 
             let repositories_list_state = &mut self.repositories_list_state;
@@ -417,13 +492,14 @@ impl App {
                             let items: Vec<ListItem> = draw_data
                                 .repositories
                                 .iter()
-                                .map(|repo| ListItem::new(format!("{} - {}", repo.name, repo.owner)))
+                                .map(|repo| {
+                                    ListItem::new(format!("{} - {}", repo.name, repo.owner))
+                                })
                                 .collect();
-                            let list = List::new(items).block(
-                                Block::default().title("Repositories").borders(Borders::ALL),
-                            )
-                            .highlight_style(Style::default().fg(Color::Yellow))
-                            .highlight_symbol("> ");
+                            let list = List::new(items)
+                                .block(Block::default().title("Repositories").borders(Borders::ALL))
+                                .highlight_style(Style::default().fg(Color::Yellow))
+                                .highlight_symbol("> ");
                             repositories_list_state.select(draw_data.current_repository_index);
                             f.render_stateful_widget(list, chunks[2], repositories_list_state);
                         }
@@ -454,13 +530,13 @@ impl App {
                         }
                     }
 
-                    let help_text = format!(
-                        "{} | Mode: {} | Tab: Switch | ↑↓/jk: Navigate | PgUp/PgDn/Ctrl+B/Ctrl+F: Page | Enter: Play | Space: Play/Pause | m: Mode | ,/.: Prev/Next | d: Delete repo | +/-: Volume | q: Quit",
-                        draw_data.status_message,
-                        draw_data.playback_mode.label()
-                    );
-                    let help = Paragraph::new(help_text).style(Style::default().fg(Color::Gray));
-                    f.render_widget(help, chunks[3]);
+                    let footer = Paragraph::new(footer_text(&draw_data))
+                        .style(Style::default().fg(Color::Gray));
+                    f.render_widget(footer, chunks[3]);
+
+                    if draw_data.show_help {
+                        render_help_popup(f, f.area());
+                    }
                 })?;
             }
         }
@@ -479,10 +555,28 @@ impl App {
     }
 
     async fn handle_key_event(&mut self, key: KeyEvent) -> Result<(), Box<dyn std::error::Error>> {
+        if self.show_help {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('?') => {
+                    self.show_help = false;
+                }
+                KeyCode::Char('q') => {
+                    self.should_quit = true;
+                }
+                _ => {}
+            }
+
+            return Ok(());
+        }
+
         match key.code {
             KeyCode::Esc => {
                 self.pending_repository_delete = None;
                 self.status_message = "Ready".to_string();
+            }
+            KeyCode::Char('?') => {
+                self.show_help = true;
+                self.pending_repository_delete = None;
             }
             KeyCode::Char('q') => {
                 self.should_quit = true;
@@ -575,11 +669,13 @@ impl App {
             KeyCode::Char('+') => {
                 let new_volume = (self.audio_player.get_volume() + 0.1).min(1.0);
                 self.audio_player.set_volume(new_volume)?;
+                self.status_message = format!("Volume: {}%", volume_percent(new_volume));
                 self.pending_repository_delete = None;
             }
             KeyCode::Char('-') => {
                 let new_volume = (self.audio_player.get_volume() - 0.1).max(0.0);
                 self.audio_player.set_volume(new_volume)?;
+                self.status_message = format!("Volume: {}%", volume_percent(new_volume));
                 self.pending_repository_delete = None;
             }
             _ => {}
@@ -949,6 +1045,10 @@ impl App {
 
         // Draw footer
         self.draw_footer(f, chunks[3], &data);
+
+        if data.show_help {
+            render_help_popup(f, f.area());
+        }
     }
 
     #[allow(dead_code)]
@@ -1031,12 +1131,8 @@ impl App {
     }
 
     #[allow(dead_code)]
-    fn draw_footer(&self, f: &mut Frame, area: ratatui::layout::Rect, _data: &DrawData<'_>) {
-        let help_text = format!(
-            "{} | Tab: Switch | ↑↓/jk: Navigate | PgUp/PgDn: Page | Enter: Play | Space: Play/Pause | +/-: Volume | q: Quit",
-            self.status_message
-        );
-        let paragraph = Paragraph::new(help_text).style(Style::default().fg(Color::Gray));
+    fn draw_footer(&self, f: &mut Frame, area: ratatui::layout::Rect, data: &DrawData<'_>) {
+        let paragraph = Paragraph::new(footer_text(data)).style(Style::default().fg(Color::Gray));
 
         f.render_widget(paragraph, area);
     }
