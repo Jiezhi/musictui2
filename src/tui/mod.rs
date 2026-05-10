@@ -5,7 +5,7 @@ use crate::events::EventBus;
 use crate::github::GitHubScanner;
 use crate::models::{PlaybackState, Repository, Track};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent},
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute, terminal,
 };
 use ratatui::{
@@ -403,7 +403,7 @@ impl App {
                     }
 
                     let help_text = format!(
-                        "{} | Tab: Switch | ↑↓/jk: Navigate | PgUp/PgDn: Page | Enter: Play | Space: Play/Pause | +/-: Volume | q: Quit",
+                        "{} | Tab: Switch | ↑↓/jk: Navigate | PgUp/PgDn/Ctrl+B/Ctrl+F: Page | Enter: Play | Space: Play/Pause | +/-: Volume | q: Quit",
                         draw_data.status_message
                     );
                     let help = Paragraph::new(help_text).style(Style::default().fg(Color::Gray));
@@ -459,6 +459,16 @@ impl App {
                 self.select_previous_track(self.tracks_page_step);
             }
             KeyCode::PageDown if self.selected_tab == 1 => {
+                self.select_next_track(self.tracks_page_step);
+            }
+            KeyCode::Char('b')
+                if self.selected_tab == 1 && key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.select_previous_track(self.tracks_page_step);
+            }
+            KeyCode::Char('f')
+                if self.selected_tab == 1 && key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
                 self.select_next_track(self.tracks_page_step);
             }
             KeyCode::Enter if self.selected_tab == 1 && !self.tracks.is_empty() => {
