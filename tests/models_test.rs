@@ -1,4 +1,4 @@
-use musictui2::models::{Repository, Track, PlaybackState};
+use musictui2::models::{PlaybackState, Repository, Track};
 use std::path::PathBuf;
 
 #[test]
@@ -50,8 +50,8 @@ fn test_playback_states() {
 
 #[test]
 fn test_track_is_playable() {
+    use std::io::Write;
     use tempfile::NamedTempFile;
-use std::io::Write;
 
     // Create a temporary file for testing
     let mut temp_file = NamedTempFile::new().unwrap();

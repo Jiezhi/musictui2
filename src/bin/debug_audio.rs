@@ -1,7 +1,7 @@
-use std::path::Path;
-use rodio::{OutputStream, Sink};
-use std::time::Duration;
 use rodio::Source;
+use rodio::{OutputStream, Sink};
+use std::path::Path;
+use std::time::Duration;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🔍 Audio Debug Tool");
@@ -13,8 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (_stream, stream_handle) = OutputStream::try_default()?;
         let sink = Sink::try_new(&stream_handle)?;
 
-        let source = rodio::source::SineWave::new(440.0)
-            .take_duration(Duration::from_secs(1));
+        let source = rodio::source::SineWave::new(440.0).take_duration(Duration::from_secs(1));
         sink.append(source);
         sink.set_volume(0.5);
 

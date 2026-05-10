@@ -1,6 +1,6 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use chrono::{DateTime, Utc};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Repository {
@@ -30,7 +30,7 @@ pub struct Track {
 
 impl Track {
     pub fn is_playable(&self) -> bool {
-        self.downloaded && self.local_path.as_ref().map_or(false, |p| p.exists())
+        self.downloaded && self.local_path.as_ref().is_some_and(|p| p.exists())
     }
 }
 

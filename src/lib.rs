@@ -1,11 +1,11 @@
 pub mod audio;
-pub mod models;
-pub mod tui;
+pub mod cache;
 pub mod cli;
 pub mod database;
-pub mod github;
 pub mod events;
-pub mod cache;
+pub mod github;
+pub mod models;
+pub mod tui;
 
 #[cfg(test)]
 mod tests {

@@ -29,7 +29,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(_) => {
             println!("   Track loaded successfully");
             println!("   Playback state: {:?}", audio_player.get_playback_state());
-            println!("   Current track: {:?}", audio_player.get_current_track().map(|t| t.name.as_str()));
+            println!(
+                "   Current track: {:?}",
+                audio_player.get_current_track().map(|t| t.name.as_str())
+            );
         }
         Err(e) => {
             println!("   Failed to load track: {}", e);

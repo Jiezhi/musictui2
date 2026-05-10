@@ -1,14 +1,21 @@
-use std::time::Duration;
-use rodio::{Decoder, OutputStream, Sink, source::SineWave, Source};
-use crate::models::{Track, PlaybackState};
+use crate::cache::{GrowingFileReader, StreamingCacheState};
 use crate::github::GitHubScanner;
+use crate::models::{PlaybackState, Track};
+use rodio::{source::SineWave, Decoder, OutputStream, Sink, Source};
+use std::fs::File;
+use std::io::BufReader;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+
+pub type StreamingDecoder = Decoder<GrowingFileReader>;
 
 pub struct AudioPlayer {
     current_track: Option<Track>,
     playback_state: PlaybackState,
     sink: Option<Sink>,
     volume: f32,
+    #[allow(dead_code)]
     github_scanner: Option<Arc<GitHubScanner>>,
     output_stream: Option<OutputStream>,
 }
@@ -27,7 +34,9 @@ impl AudioPlayer {
     }
 
     #[allow(dead_code)]
-    pub fn with_github_scanner(scanner: Arc<GitHubScanner>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn with_github_scanner(
+        scanner: Arc<GitHubScanner>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
             current_track: None,
             playback_state: PlaybackState::Stopped,
@@ -38,57 +47,20 @@ impl AudioPlayer {
         })
     }
 
+    #[allow(dead_code)]
     pub async fn load_track(&mut self, track: Track) -> Result<(), Box<dyn std::error::Error>> {
-        // Stop current playback
-        self.stop()?;
-
-        // Create new output stream and sink
-        let (stream, stream_handle) = OutputStream::try_default()?;
-        let sink = Sink::try_new(&stream_handle)?;
-
-        // Store the output stream to keep it alive
-        self.output_stream = Some(stream);
-
-        // Check if track is downloaded
-        if let Some(local_path) = &track.local_path {
-            if local_path.exists() {
-                // Load audio file
-                let file = std::fs::File::open(local_path)?;
-                let source = Decoder::new(std::io::BufReader::new(file))?;
-
-                // Set volume
-                sink.set_volume(self.volume);
-
-                // Play the track
-                sink.append(source);
-
-                self.current_track = Some(track);
-                self.playback_state = PlaybackState::Playing;
-                self.sink = Some(sink);
-
-                return Ok(());
-            }
+        if track.is_playable() {
+            return self.load_local_track(track);
         }
 
         // If track is not downloaded, try to download it
         if let Some(scanner) = &self.github_scanner {
             match scanner.download_track(&track).await {
                 Ok(local_path) => {
-                    // Load audio file
-                    let file = std::fs::File::open(&local_path)?;
-                    let source = Decoder::new(std::io::BufReader::new(file))?;
-
-                    // Set volume
-                    sink.set_volume(self.volume);
-
-                    // Play the track
-                    sink.append(source);
-
-                    self.current_track = Some(track);
-                    self.playback_state = PlaybackState::Playing;
-                    self.sink = Some(sink);
-
-                    return Ok(());
+                    let mut downloaded_track = track;
+                    downloaded_track.local_path = Some(local_path);
+                    downloaded_track.downloaded = true;
+                    return self.load_local_track(downloaded_track);
                 }
                 Err(e) => {
                     return Err(format!("Failed to download track: {}", e).into());
@@ -100,6 +72,58 @@ impl AudioPlayer {
         Err("Track not downloaded or file not found. Please download the track first.".into())
     }
 
+    pub fn load_local_track(&mut self, track: Track) -> Result<(), Box<dyn std::error::Error>> {
+        self.stop()?;
+
+        let local_path = track
+            .local_path
+            .as_ref()
+            .ok_or("Track has no local file path")?;
+
+        if !local_path.exists() {
+            return Err(format!("Track file not found: {}", local_path.display()).into());
+        }
+
+        let (stream, stream_handle) = OutputStream::try_default()?;
+        let sink = Sink::try_new(&stream_handle)?;
+        let file = File::open(local_path)?;
+        let source = Decoder::new(BufReader::new(file))?;
+
+        sink.set_volume(self.volume);
+        sink.append(source);
+        sink.play();
+
+        self.output_stream = Some(stream);
+        self.current_track = Some(track);
+        self.playback_state = PlaybackState::Playing;
+        self.sink = Some(sink);
+
+        Ok(())
+    }
+
+    pub fn load_streaming_track(
+        &mut self,
+        track: Track,
+        source: StreamingDecoder,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.stop()?;
+
+        let (stream, stream_handle) = OutputStream::try_default()?;
+        let sink = Sink::try_new(&stream_handle)?;
+
+        sink.set_volume(self.volume);
+        sink.append(source);
+        sink.play();
+
+        self.output_stream = Some(stream);
+        self.current_track = Some(track);
+        self.playback_state = PlaybackState::Playing;
+        self.sink = Some(sink);
+
+        Ok(())
+    }
+
+    #[allow(dead_code)]
     pub fn play(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(sink) = &mut self.sink {
             if sink.empty() {
@@ -180,9 +204,7 @@ impl AudioPlayer {
 
     #[allow(dead_code)]
     pub fn get_duration(&self) -> Option<Duration> {
-        self.current_track
-            .as_ref()
-            .and_then(|track| track.duration)
+        self.current_track.as_ref().and_then(|track| track.duration)
     }
 
     #[allow(dead_code)]
@@ -218,6 +240,41 @@ impl AudioPlayer {
     }
 }
 
+pub fn prepare_streaming_decoder(
+    cache_path: PathBuf,
+    state: StreamingCacheState,
+    format: String,
+    initial_buffer_bytes: u64,
+) -> Result<StreamingDecoder, String> {
+    state.wait_for_bytes(initial_buffer_bytes)?;
+    let reader =
+        GrowingFileReader::open(&cache_path, state.clone()).map_err(|err| err.to_string())?;
+
+    match decode_streaming_reader(reader, &format) {
+        Ok(decoder) => Ok(decoder),
+        Err(_first_error) if !state.is_complete() => {
+            state.wait_until_complete().map_err(|err| err.to_string())?;
+            let reader =
+                GrowingFileReader::open(cache_path, state).map_err(|err| err.to_string())?;
+            decode_streaming_reader(reader, &format).map_err(|err| err.to_string())
+        }
+        Err(err) => Err(format!("{err}")),
+    }
+}
+
+fn decode_streaming_reader(
+    reader: GrowingFileReader,
+    format: &str,
+) -> Result<StreamingDecoder, rodio::decoder::DecoderError> {
+    match format {
+        "flac" => Decoder::new_flac(reader),
+        "mp3" => Decoder::new_mp3(reader),
+        "ogg" => Decoder::new_vorbis(reader),
+        "wav" => Decoder::new_wav(reader),
+        _ => Decoder::new(reader),
+    }
+}
+
 impl Drop for AudioPlayer {
     fn drop(&mut self) {
         let _ = self.stop();
@@ -238,7 +295,7 @@ impl std::fmt::Debug for AudioPlayer {
 mod tests {
     use super::*;
     use crate::models::Track;
-    
+
     #[test]
     fn test_audio_player_creation() {
         let player = AudioPlayer::new();
@@ -266,8 +323,8 @@ mod tests {
 
     #[test]
     fn test_track_playable_status() {
-        use tempfile::NamedTempFile;
         use std::io::Write;
+        use tempfile::NamedTempFile;
 
         // Create a temporary file
         let mut temp_file = NamedTempFile::new().unwrap();

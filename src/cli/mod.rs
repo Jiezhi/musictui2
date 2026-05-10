@@ -43,7 +43,8 @@ impl Cli {
         };
 
         self.database.save_repository(&repository)?;
-        self.scan_repository(&format!("{owner}/{repo_name}")).await?;
+        self.scan_repository(&format!("{owner}/{repo_name}"))
+            .await?;
 
         Ok(())
     }
@@ -62,7 +63,8 @@ impl Cli {
         }
 
         let (owner, repo_name) = parse_repository_url(repo_identifier)?;
-        self.database.delete_repository_by_name(&owner, &repo_name)?;
+        self.database
+            .delete_repository_by_name(&owner, &repo_name)?;
 
         Ok(())
     }
@@ -72,7 +74,10 @@ impl Cli {
         repo_identifier: &str,
     ) -> Result<Vec<Track>, Box<dyn std::error::Error>> {
         let (owner, repo_name) = parse_repository_url(repo_identifier)?;
-        let tracks = self.github_scanner.scan_repository(&owner, &repo_name).await?;
+        let tracks = self
+            .github_scanner
+            .scan_repository(&owner, &repo_name)
+            .await?;
 
         self.database.update_last_scanned(&owner, &repo_name)?;
 
@@ -92,7 +97,10 @@ impl Cli {
         Ok(updated_track)
     }
 
-    pub async fn list_tracks(&self, repo_identifier: Option<&str>) -> Result<Vec<Track>, Box<dyn std::error::Error>> {
+    pub async fn list_tracks(
+        &self,
+        repo_identifier: Option<&str>,
+    ) -> Result<Vec<Track>, Box<dyn std::error::Error>> {
         if let Some(repo_identifier) = repo_identifier {
             let (owner, repo_name) = parse_repository_url(repo_identifier)?;
             Ok(self.database.get_tracks_by_repo_name(&owner, &repo_name)?)

@@ -1,21 +1,33 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+fn load_env_file() {
+    if let Ok(env) = std::fs::read_to_string(".env") {
+        for line in env.lines() {
+            if let Some((key, value)) = line.split_once('=') {
+                std::env::set_var(key.trim(), value.trim());
+            }
+        }
+    }
+}
+
 mod audio;
 mod cache;
 mod cli;
 mod database;
 mod events;
 mod github;
-mod tui;
 pub mod models;
+mod tui;
 
 use cli::Cli;
 use events::EventBus;
 
 #[derive(Parser)]
 #[command(name = "musictui2")]
-#[command(about = "Cross-platform terminal music player that streams audio files directly from GitHub repositories")]
+#[command(
+    about = "Cross-platform terminal music player that streams audio files directly from GitHub repositories"
+)]
 struct Args {
     #[command(subcommand)]
     command: Commands,
@@ -62,6 +74,9 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load .env file at startup
+    load_env_file();
+
     let args = Args::parse();
 
     let event_bus = EventBus::new();
@@ -95,7 +110,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::UpdateScan { repository } => {
             let tracks = cli.scan_repository(&repository).await?;
-            println!("Updated scan for {}: found {} audio files", repository, tracks.len());
+            println!(
+                "Updated scan for {}: found {} audio files",
+                repository,
+                tracks.len()
+            );
             for track in tracks {
                 println!("  - {} (ID: {})", track.path, track.id);
             }
@@ -108,7 +127,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let tracks = cli.list_tracks(repository.as_deref()).await?;
             println!("Found {} tracks:", tracks.len());
             for track in tracks {
-                let status = if track.downloaded { "Downloaded" } else { "Not downloaded" };
+                let status = if track.downloaded {
+                    "Downloaded"
+                } else {
+                    "Not downloaded"
+                };
                 println!("  - {} (ID: {}) - {}", track.name, track.id, status);
             }
         }

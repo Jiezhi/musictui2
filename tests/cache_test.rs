@@ -1,11 +1,12 @@
 use musictui2::cache::CacheManager;
-use std::fs;
 use tempfile::tempdir;
 
 #[tokio::test]
 async fn test_cache_put_and_get() {
+    let temp_dir = tempdir().unwrap();
+
     // Create a new cache manager
-    let mut cache = CacheManager::new();
+    let mut cache = CacheManager::from_dir(temp_dir.path().join("cache"));
 
     // Set a custom max size
     cache.set_max_size(1024 * 1024); // 1MB
@@ -31,8 +32,10 @@ async fn test_cache_put_and_get() {
 
 #[tokio::test]
 async fn test_cache_exists() {
+    let temp_dir = tempdir().unwrap();
+
     // Create a cache manager
-    let mut cache = CacheManager::new();
+    let mut cache = CacheManager::from_dir(temp_dir.path().join("cache"));
     cache.set_max_size(1024 * 1024);
 
     // Initially not exists
@@ -45,7 +48,8 @@ async fn test_cache_exists() {
 
 #[tokio::test]
 async fn test_cache_remove() {
-    let mut cache = CacheManager::new();
+    let temp_dir = tempdir().unwrap();
+    let mut cache = CacheManager::from_dir(temp_dir.path().join("cache"));
     cache.set_max_size(1024 * 1024);
 
     // Put data
@@ -60,7 +64,8 @@ async fn test_cache_remove() {
 
 #[tokio::test]
 async fn test_cache_cleanup() {
-    let mut cache = CacheManager::new();
+    let temp_dir = tempdir().unwrap();
+    let mut cache = CacheManager::from_dir(temp_dir.path().join("cache"));
     cache.set_max_size(1024); // 1KB limit
 
     // Put multiple files

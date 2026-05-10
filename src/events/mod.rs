@@ -48,19 +48,17 @@ impl EventBus {
     }
 
     #[allow(dead_code)]
-    pub fn subscribe(&self) -> mpsc::Receiver<Event> {
-        let (tx, rx) = mpsc::channel();
-        let mut subscribers = self.subscribers.lock().unwrap();
-        subscribers.push(tx);
-        rx
-    }
-
-    #[allow(dead_code)]
     pub fn publish(&self, event: Event) {
         let subscribers = self.subscribers.lock().unwrap();
         for subscriber in subscribers.iter() {
             let _ = subscriber.send(event.clone());
         }
+    }
+}
+
+impl Default for EventBus {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

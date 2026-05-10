@@ -1,4 +1,13 @@
-use std::io;
+use crate::audio::{prepare_streaming_decoder, AudioPlayer, StreamingDecoder};
+use crate::cache::StreamingCacheState;
+use crate::database::DatabaseManager;
+use crate::events::EventBus;
+use crate::github::GitHubScanner;
+use crate::models::{PlaybackState, Repository, Track};
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEvent},
+    execute, terminal,
+};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -6,24 +15,124 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph, Row, Table, Tabs},
     Frame, Terminal,
 };
-use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent},
-    execute, terminal,
-};
-use crate::events::EventBus;
-use crate::models::{Track, Repository, PlaybackState};
-use crate::database::DatabaseManager;
-use crate::audio::AudioPlayer;
-use crate::github::GitHubScanner;
+use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::task::JoinHandle;
+
+const INITIAL_STREAM_BUFFER_BYTES: u64 = 256 * 1024;
+
+struct TerminalCleanup;
+
+impl Drop for TerminalCleanup {
+    fn drop(&mut self) {
+        let _ = terminal::disable_raw_mode();
+        let _ = execute!(
+            io::stdout(),
+            terminal::LeaveAlternateScreen,
+            crossterm::event::DisableMouseCapture
+        );
+    }
+}
 
 struct DrawData<'a> {
     repositories: &'a Vec<Repository>,
     tracks: &'a Vec<Track>,
     selected_tab: usize,
     current_track_index: Option<usize>,
+    caching_track_index: Option<usize>,
     playback_state: &'a PlaybackState,
     current_track: Option<&'a Track>,
+    status_message: &'a str,
+}
+
+struct PendingPlayback {
+    track_index: usize,
+    track: Track,
+    state: PendingPlaybackState,
+}
+
+enum PendingPlaybackState {
+    Preparing {
+        cache_state: StreamingCacheState,
+        download_handle: JoinHandle<Result<PathBuf, String>>,
+        decoder_handle: JoinHandle<Result<StreamingDecoder, String>>,
+    },
+    Caching {
+        cache_state: StreamingCacheState,
+        download_handle: JoinHandle<Result<PathBuf, String>>,
+    },
+}
+
+impl PendingPlayback {
+    fn cancel(self) {
+        match self.state {
+            PendingPlaybackState::Preparing {
+                cache_state,
+                download_handle,
+                decoder_handle,
+            } => {
+                cache_state.mark_error("Playback cancelled");
+                download_handle.abort();
+                decoder_handle.abort();
+            }
+            PendingPlaybackState::Caching {
+                cache_state,
+                download_handle,
+            } => {
+                cache_state.mark_error("Playback cancelled");
+                download_handle.abort();
+            }
+        }
+    }
+
+    fn cache_progress(&self) -> Option<(u64, u64)> {
+        let cache_state = match &self.state {
+            PendingPlaybackState::Preparing { cache_state, .. }
+            | PendingPlaybackState::Caching { cache_state, .. } => cache_state,
+        };
+
+        Some((cache_state.downloaded_bytes(), self.track.size))
+    }
+
+    fn cache_percent(&self) -> Option<u64> {
+        let (downloaded_bytes, total_bytes) = self.cache_progress()?;
+        if total_bytes == 0 {
+            return None;
+        }
+
+        Some((downloaded_bytes.saturating_mul(100) / total_bytes).min(100))
+    }
+}
+
+fn initial_buffer_bytes(track: &Track) -> u64 {
+    if track.size == 0 {
+        INITIAL_STREAM_BUFFER_BYTES
+    } else {
+        INITIAL_STREAM_BUFFER_BYTES.min(track.size)
+    }
+}
+
+fn cache_label(track: &Track, is_caching: bool) -> String {
+    if track.is_playable() {
+        "Cached".to_string()
+    } else if is_caching {
+        "Caching".to_string()
+    } else {
+        "-".to_string()
+    }
+}
+
+fn pending_status(action: &str, pending: &PendingPlayback, track_name: &str) -> String {
+    if let Some(percent) = pending.cache_percent() {
+        format!("{action} {track_name} | Caching {percent}%")
+    } else {
+        let downloaded_mb = pending
+            .cache_progress()
+            .map(|(downloaded_bytes, _)| downloaded_bytes / 1024 / 1024)
+            .unwrap_or_default();
+        format!("{action} {track_name} | Caching {downloaded_mb}MB")
+    }
 }
 
 pub struct App {
@@ -38,6 +147,8 @@ pub struct App {
     database: Arc<DatabaseManager>,
     #[allow(dead_code)]
     github_scanner: Arc<GitHubScanner>,
+    pending_playback: Option<PendingPlayback>,
+    status_message: String,
     should_quit: bool,
 }
 
@@ -60,6 +171,8 @@ impl App {
             event_bus,
             database,
             github_scanner,
+            pending_playback: None,
+            status_message: "Ready".to_string(),
             should_quit: false,
         })
     }
@@ -67,6 +180,7 @@ impl App {
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let mut stdout = io::stdout();
         terminal::enable_raw_mode()?;
+        let _cleanup = TerminalCleanup;
         execute!(
             stdout,
             terminal::EnterAlternateScreen,
@@ -92,7 +206,7 @@ impl App {
             }
 
             if last_tick.elapsed() >= tick_rate {
-                self.on_tick();
+                self.on_tick().await?;
                 last_tick = std::time::Instant::now();
             }
 
@@ -101,8 +215,13 @@ impl App {
                 tracks: &self.tracks,
                 selected_tab: self.selected_tab,
                 current_track_index: self.current_track_index,
+                caching_track_index: self
+                    .pending_playback
+                    .as_ref()
+                    .map(|pending| pending.track_index),
                 playback_state: self.audio_player.get_playback_state(),
                 current_track: self.audio_player.get_current_track(),
+                status_message: &self.status_message,
             };
 
             if let Some(terminal) = &mut self.terminal {
@@ -163,6 +282,7 @@ impl App {
                                         track.name.clone(),
                                         track.format.clone(),
                                         format!("{}MB", track.size / 1024 / 1024),
+                                        cache_label(track, Some(i) == draw_data.caching_track_index),
                                     ]);
                                     if Some(i) == draw_data.current_track_index {
                                         row = row.style(Style::default().fg(Color::Yellow));
@@ -174,14 +294,15 @@ impl App {
                             let table = Table::new(
                                 rows,
                                 [
-                                    Constraint::Percentage(60),
-                                    Constraint::Percentage(20),
-                                    Constraint::Percentage(20),
+                                    Constraint::Percentage(55),
+                                    Constraint::Percentage(15),
+                                    Constraint::Percentage(15),
+                                    Constraint::Percentage(15),
                                 ],
                             )
                             .block(Block::default().title("Tracks").borders(Borders::ALL))
                             .header(
-                                Row::new(vec!["Name", "Format", "Size"])
+                                Row::new(vec!["Name", "Format", "Size", "Cache"])
                                     .style(Style::default().fg(Color::Cyan)),
                             );
                             f.render_widget(table, chunks[2]);
@@ -205,23 +326,16 @@ impl App {
                         }
                     }
 
-                    let help = Paragraph::new(
-                        "Tab: Switch | ↑↓/jk: Navigate | Enter: Play | Space: Play/Pause | +/-: Volume | q: Quit",
-                    )
-                    .style(Style::default().fg(Color::Gray));
+                    let help_text = format!(
+                        "{} | Tab: Switch | ↑↓/jk: Navigate | Enter: Play | Space: Play/Pause | +/-: Volume | q: Quit",
+                        draw_data.status_message
+                    );
+                    let help = Paragraph::new(help_text).style(Style::default().fg(Color::Gray));
                     f.render_widget(help, chunks[3]);
                 })?;
             }
         }
 
-        if let Some(terminal) = &mut self.terminal {
-            terminal::disable_raw_mode()?;
-            execute!(
-                terminal.backend_mut(),
-                terminal::LeaveAlternateScreen,
-                crossterm::event::DisableMouseCapture
-            )?;
-        }
         self.terminal = None;
 
         Ok(())
@@ -229,9 +343,7 @@ impl App {
 
     fn load_data(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.repositories = self.database.get_repositories()?;
-        if let Some(repo) = self.repositories.first() {
-            self.tracks = self.database.get_tracks_by_repo(repo.id)?;
-        }
+        self.tracks = self.database.get_all_tracks()?;
         Ok(())
     }
 
@@ -239,19 +351,19 @@ impl App {
         match key.code {
             KeyCode::Char('q') => {
                 self.should_quit = true;
-            },
+            }
             KeyCode::Char('n') => {
                 self.selected_tab = (self.selected_tab + 1) % 3;
-            },
+            }
             KeyCode::Char('p') => {
                 self.selected_tab = (self.selected_tab + 3 - 1) % 3;
-            },
+            }
             KeyCode::Tab => {
                 self.selected_tab = (self.selected_tab + 1) % 3;
-            },
+            }
             KeyCode::BackTab => {
                 self.selected_tab = (self.selected_tab + 3 - 1) % 3;
-            },
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 if self.selected_tab == 0 {
                     // Navigate repositories - not implemented yet
@@ -265,7 +377,7 @@ impl App {
                         self.current_track_index = Some(0);
                     }
                 }
-            },
+            }
             KeyCode::Down | KeyCode::Char('j') => {
                 if self.selected_tab == 0 {
                     // Navigate repositories - not implemented yet
@@ -279,52 +391,198 @@ impl App {
                         self.current_track_index = Some(0);
                     }
                 }
-            },
-            KeyCode::Enter => {
-                if self.selected_tab == 1 && !self.tracks.is_empty() {
-                    if let Some(index) = self.current_track_index {
-                        self.play_track(index).await?;
-                    }
+            }
+            KeyCode::Enter if self.selected_tab == 1 && !self.tracks.is_empty() => {
+                if let Some(index) = self.current_track_index {
+                    self.queue_track(index)?;
                 }
-            },
+            }
             KeyCode::Char(' ') => {
                 if self.audio_player.is_playing() {
                     self.audio_player.pause()?;
+                    self.status_message = "Paused".to_string();
                 } else {
                     if let Some(index) = self.current_track_index {
-                        self.play_track(index).await?;
+                        self.queue_track(index)?;
                     }
                 }
-            },
+            }
             KeyCode::Char('+') => {
                 let new_volume = (self.audio_player.get_volume() + 0.1).min(1.0);
                 self.audio_player.set_volume(new_volume)?;
-            },
+            }
             KeyCode::Char('-') => {
                 let new_volume = (self.audio_player.get_volume() - 0.1).max(0.0);
                 self.audio_player.set_volume(new_volume)?;
-            },
+            }
             _ => {}
         }
 
         Ok(())
     }
 
-    async fn play_track(&mut self, index: usize) -> Result<(), Box<dyn std::error::Error>> {
+    fn queue_track(&mut self, index: usize) -> Result<(), Box<dyn std::error::Error>> {
         if index < self.tracks.len() {
-            let track = &self.tracks[index];
-            self.audio_player.load_track(track.clone()).await?;
-            self.audio_player.play()?;
             self.current_track_index = Some(index);
+            let track = self.tracks[index].clone();
+
+            if track.is_playable() {
+                if let Some(pending) = self.pending_playback.take() {
+                    pending.cancel();
+                }
+                self.audio_player.load_local_track(track.clone())?;
+                self.status_message = format!("Playing {}", track.name);
+                return Ok(());
+            }
+
+            if let Some(pending) = self.pending_playback.take() {
+                pending.cancel();
+            }
+
+            let streaming_download = self
+                .github_scanner
+                .start_streaming_download(track.clone())?;
+            let decoder_cache_path = streaming_download.cache_path.clone();
+            let decoder_cache_state = streaming_download.state.clone();
+            let format = track.format.clone();
+            let initial_buffer_bytes = initial_buffer_bytes(&track);
+            let decoder_handle = tokio::task::spawn_blocking(move || {
+                prepare_streaming_decoder(
+                    decoder_cache_path,
+                    decoder_cache_state,
+                    format,
+                    initial_buffer_bytes,
+                )
+            });
+
+            self.pending_playback = Some(PendingPlayback {
+                track_index: index,
+                track: track.clone(),
+                state: PendingPlaybackState::Preparing {
+                    cache_state: streaming_download.state,
+                    download_handle: streaming_download.handle,
+                    decoder_handle,
+                },
+            });
+            self.status_message = format!("Buffering {}", track.name);
         }
         Ok(())
     }
 
-    fn on_tick(&mut self) {
-        // Update UI based on current state
-        if self.audio_player.is_playing() {
-            // Could update progress bar here
+    async fn on_tick(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(pending) = self.pending_playback.take() {
+            self.handle_pending_playback(pending).await?;
+        } else if self.audio_player.is_playing() {
+            if let Some(track) = self.audio_player.get_current_track() {
+                self.status_message = format!("Playing {}", track.name);
+            }
         }
+
+        Ok(())
+    }
+
+    async fn handle_pending_playback(
+        &mut self,
+        pending: PendingPlayback,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match pending.state {
+            PendingPlaybackState::Preparing {
+                cache_state,
+                download_handle,
+                decoder_handle,
+            } => {
+                if decoder_handle.is_finished() {
+                    match decoder_handle.await {
+                        Ok(Ok(decoder)) => {
+                            let track = pending.track.clone();
+                            self.audio_player
+                                .load_streaming_track(track.clone(), decoder)?;
+                            self.current_track_index = Some(pending.track_index);
+                            let pending = PendingPlayback {
+                                track_index: pending.track_index,
+                                track,
+                                state: PendingPlaybackState::Caching {
+                                    cache_state,
+                                    download_handle,
+                                },
+                            };
+                            self.status_message =
+                                pending_status("Playing", &pending, pending.track.name.as_str());
+                            self.pending_playback = Some(pending);
+                        }
+                        Ok(Err(err)) => {
+                            cache_state.mark_error(err.clone());
+                            download_handle.abort();
+                            self.status_message = format!("Playback failed: {}", err);
+                        }
+                        Err(err) => {
+                            cache_state.mark_error(err.to_string());
+                            download_handle.abort();
+                            self.status_message = format!("Playback task failed: {}", err);
+                        }
+                    }
+                } else {
+                    let pending = PendingPlayback {
+                        track_index: pending.track_index,
+                        track: pending.track,
+                        state: PendingPlaybackState::Preparing {
+                            cache_state,
+                            download_handle,
+                            decoder_handle,
+                        },
+                    };
+                    self.status_message =
+                        pending_status("Buffering", &pending, pending.track.name.as_str());
+                    self.pending_playback = Some(pending);
+                }
+            }
+            PendingPlaybackState::Caching {
+                cache_state,
+                download_handle,
+            } => {
+                if download_handle.is_finished() {
+                    match download_handle.await {
+                        Ok(Ok(local_path)) => {
+                            let mut track = pending.track;
+                            track.local_path = Some(local_path);
+                            track.downloaded = true;
+
+                            if let Some(stored_track) = self.tracks.get_mut(pending.track_index) {
+                                *stored_track = track.clone();
+                            }
+
+                            if self.audio_player.is_playing() {
+                                self.status_message = format!("Playing {} | Cached", track.name);
+                            } else {
+                                self.status_message = format!("Cached {}", track.name);
+                            }
+                        }
+                        Ok(Err(err)) => {
+                            cache_state.mark_error(err.clone());
+                            self.status_message = format!("Cache failed: {}", err);
+                        }
+                        Err(err) => {
+                            cache_state.mark_error(err.to_string());
+                            self.status_message = format!("Cache task failed: {}", err);
+                        }
+                    }
+                } else {
+                    let pending = PendingPlayback {
+                        track_index: pending.track_index,
+                        track: pending.track,
+                        state: PendingPlaybackState::Caching {
+                            cache_state,
+                            download_handle,
+                        },
+                    };
+                    self.status_message =
+                        pending_status("Playing", &pending, pending.track.name.as_str());
+                    self.pending_playback = Some(pending);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -332,10 +590,10 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // Header
-                Constraint::Length(1),  // Tabs
-                Constraint::Min(0),      // Main content
-                Constraint::Length(1),  // Footer
+                Constraint::Length(3), // Header
+                Constraint::Length(1), // Tabs
+                Constraint::Min(0),    // Main content
+                Constraint::Length(1), // Footer
             ])
             .split(f.area());
 
@@ -364,7 +622,11 @@ impl App {
             .borders(Borders::ALL)
             .style(Style::default().fg(Color::Cyan));
 
-        let text = format!("Repositories: {} | Tracks: {}", self.repositories.len(), self.tracks.len());
+        let text = format!(
+            "Repositories: {} | Tracks: {}",
+            self.repositories.len(),
+            self.tracks.len()
+        );
         let paragraph = Paragraph::new(text)
             .block(block)
             .style(Style::default().fg(Color::White));
@@ -387,11 +649,10 @@ impl App {
 
     #[allow(dead_code)]
     fn draw_repositories(&self, f: &mut Frame, area: ratatui::layout::Rect, data: &DrawData<'_>) {
-        let block = Block::default()
-            .title("Repositories")
-            .borders(Borders::ALL);
+        let block = Block::default().title("Repositories").borders(Borders::ALL);
 
-        let items: Vec<ListItem> = data.repositories
+        let items: Vec<ListItem> = data
+            .repositories
             .iter()
             .map(|repo| ListItem::new(format!("{} - {}", repo.name, repo.owner)))
             .collect();
@@ -405,11 +666,10 @@ impl App {
 
     #[allow(dead_code)]
     fn draw_tracks(&self, f: &mut Frame, area: ratatui::layout::Rect, data: &DrawData<'_>) {
-        let block = Block::default()
-            .title("Tracks")
-            .borders(Borders::ALL);
+        let block = Block::default().title("Tracks").borders(Borders::ALL);
 
-        let rows: Vec<Row> = data.tracks
+        let rows: Vec<Row> = data
+            .tracks
             .iter()
             .enumerate()
             .map(|(i, track)| {
@@ -417,6 +677,7 @@ impl App {
                     track.name.clone(),
                     track.format.clone(),
                     format!("{}MB", track.size / 1024 / 1024),
+                    cache_label(track, Some(i) == data.caching_track_index),
                 ]);
 
                 if Some(i) == data.current_track_index {
@@ -427,22 +688,27 @@ impl App {
             })
             .collect();
 
-        let table = Table::new(rows, &[
-                Constraint::Percentage(60),
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-            ])
-            .block(block)
-            .header(Row::new(vec!["Name", "Format", "Size"]).style(Style::default().fg(Color::Cyan)));
+        let table = Table::new(
+            rows,
+            &[
+                Constraint::Percentage(55),
+                Constraint::Percentage(15),
+                Constraint::Percentage(15),
+                Constraint::Percentage(15),
+            ],
+        )
+        .block(block)
+        .header(
+            Row::new(vec!["Name", "Format", "Size", "Cache"])
+                .style(Style::default().fg(Color::Cyan)),
+        );
 
         f.render_widget(table, area);
     }
 
     #[allow(dead_code)]
     fn draw_now_playing(&self, f: &mut Frame, area: ratatui::layout::Rect, data: &DrawData<'_>) {
-        let block = Block::default()
-            .title("Now Playing")
-            .borders(Borders::ALL);
+        let block = Block::default().title("Now Playing").borders(Borders::ALL);
 
         let content = if let Some(track) = data.current_track {
             let status = match data.playback_state {
@@ -465,16 +731,17 @@ impl App {
 
     #[allow(dead_code)]
     fn draw_footer(&self, f: &mut Frame, area: ratatui::layout::Rect, _data: &DrawData<'_>) {
-        let help_text = "Tab: Switch | ↑↓/jk: Navigate | Enter: Play | Space: Play/Pause | +/-: Volume | q: Quit";
-        let paragraph = Paragraph::new(help_text)
-            .style(Style::default().fg(Color::Gray));
+        let help_text = format!(
+            "{} | Tab: Switch | ↑↓/jk: Navigate | Enter: Play | Space: Play/Pause | +/-: Volume | q: Quit",
+            self.status_message
+        );
+        let paragraph = Paragraph::new(help_text).style(Style::default().fg(Color::Gray));
 
         f.render_widget(paragraph, area);
     }
 
-    fn show_error(&self, error: &str) {
-        // In a real implementation, this would show an error message in the UI
-        eprintln!("Error: {}", error);
+    fn show_error(&mut self, error: &str) {
+        self.status_message = format!("Error: {}", error);
     }
 }
 
