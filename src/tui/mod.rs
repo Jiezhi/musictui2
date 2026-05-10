@@ -10,9 +10,9 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Row, Table, Tabs},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Row, Table, TableState, Tabs},
     Frame, Terminal,
 };
 use std::io;
@@ -21,6 +21,7 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 const INITIAL_STREAM_BUFFER_BYTES: u64 = 256 * 1024;
+const DEFAULT_TRACKS_PAGE_STEP: usize = 10;
 
 struct TerminalCleanup;
 
@@ -135,11 +136,106 @@ fn pending_status(action: &str, pending: &PendingPlayback, track_name: &str) -> 
     }
 }
 
+fn track_page_step_for_area(area: Rect) -> usize {
+    // Tracks table height minus top/bottom borders and the header row.
+    usize::from(area.height.saturating_sub(3).max(1))
+}
+
+fn next_track_index(current: Option<usize>, len: usize, step: usize) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+
+    let Some(current) = current else {
+        return Some(0);
+    };
+
+    Some(current.saturating_add(step.max(1)).min(len - 1))
+}
+
+fn previous_track_index(current: Option<usize>, len: usize, step: usize) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+
+    let Some(current) = current else {
+        return Some(0);
+    };
+
+    Some(current.saturating_sub(step.max(1)))
+}
+
+fn tracks_table(data: &DrawData<'_>) -> Table<'static> {
+    let rows: Vec<Row<'static>> = data
+        .tracks
+        .iter()
+        .enumerate()
+        .map(|(i, track)| {
+            let mut row = Row::new(vec![
+                track.name.clone(),
+                track.format.clone(),
+                format!("{}MB", track.size / 1024 / 1024),
+                cache_label(track, Some(i) == data.caching_track_index),
+            ]);
+            if Some(i) == data.current_track_index {
+                row = row.style(Style::default().fg(Color::Yellow));
+            }
+            row
+        })
+        .collect();
+
+    Table::new(
+        rows,
+        [
+            Constraint::Percentage(55),
+            Constraint::Percentage(15),
+            Constraint::Percentage(15),
+            Constraint::Percentage(15),
+        ],
+    )
+    .block(Block::default().title("Tracks").borders(Borders::ALL))
+    .header(
+        Row::new(vec!["Name", "Format", "Size", "Cache"]).style(Style::default().fg(Color::Cyan)),
+    )
+    .highlight_style(Style::default().fg(Color::Yellow))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn track_page_step_matches_visible_table_rows() {
+        assert_eq!(track_page_step_for_area(Rect::new(0, 0, 80, 20)), 17);
+        assert_eq!(track_page_step_for_area(Rect::new(0, 0, 80, 2)), 1);
+    }
+
+    #[test]
+    fn next_track_index_pages_and_clamps() {
+        assert_eq!(next_track_index(None, 10, 5), Some(0));
+        assert_eq!(next_track_index(Some(2), 10, 5), Some(7));
+        assert_eq!(next_track_index(Some(8), 10, 5), Some(9));
+        assert_eq!(next_track_index(Some(2), 10, 0), Some(3));
+        assert_eq!(next_track_index(Some(0), 0, 5), None);
+    }
+
+    #[test]
+    fn previous_track_index_pages_and_clamps() {
+        assert_eq!(previous_track_index(None, 10, 5), Some(0));
+        assert_eq!(previous_track_index(Some(7), 10, 5), Some(2));
+        assert_eq!(previous_track_index(Some(2), 10, 5), Some(0));
+        assert_eq!(previous_track_index(Some(2), 10, 0), Some(1));
+        assert_eq!(previous_track_index(Some(0), 0, 5), None);
+    }
+}
+
 pub struct App {
     terminal: Option<Terminal<CrosstermBackend<io::Stdout>>>,
     selected_tab: usize,
     repositories: Vec<Repository>,
     tracks: Vec<Track>,
+    tracks_table_state: TableState,
+    tracks_page_step: usize,
     audio_player: AudioPlayer,
     current_track_index: Option<usize>,
     #[allow(dead_code)]
@@ -166,6 +262,8 @@ impl App {
             selected_tab: 0,
             repositories: Vec::new(),
             tracks: Vec::new(),
+            tracks_table_state: TableState::default(),
+            tracks_page_step: DEFAULT_TRACKS_PAGE_STEP,
             audio_player,
             current_track_index: None,
             event_bus,
@@ -224,6 +322,9 @@ impl App {
                 status_message: &self.status_message,
             };
 
+            let tracks_table_state = &mut self.tracks_table_state;
+            let tracks_page_step = &mut self.tracks_page_step;
+
             if let Some(terminal) = &mut self.terminal {
                 terminal.draw(|f| {
                     let chunks = Layout::default()
@@ -235,6 +336,8 @@ impl App {
                             Constraint::Length(1),
                         ])
                         .split(f.area());
+
+                    *tracks_page_step = track_page_step_for_area(chunks[2]);
 
                     let block = Block::default()
                         .title("Musictui2 - Terminal Music Player")
@@ -273,39 +376,12 @@ impl App {
                             f.render_widget(list, chunks[2]);
                         }
                         1 => {
-                            let rows: Vec<Row> = draw_data
-                                .tracks
-                                .iter()
-                                .enumerate()
-                                .map(|(i, track)| {
-                                    let mut row = Row::new(vec![
-                                        track.name.clone(),
-                                        track.format.clone(),
-                                        format!("{}MB", track.size / 1024 / 1024),
-                                        cache_label(track, Some(i) == draw_data.caching_track_index),
-                                    ]);
-                                    if Some(i) == draw_data.current_track_index {
-                                        row = row.style(Style::default().fg(Color::Yellow));
-                                    }
-                                    row
-                                })
-                                .collect();
-
-                            let table = Table::new(
-                                rows,
-                                [
-                                    Constraint::Percentage(55),
-                                    Constraint::Percentage(15),
-                                    Constraint::Percentage(15),
-                                    Constraint::Percentage(15),
-                                ],
-                            )
-                            .block(Block::default().title("Tracks").borders(Borders::ALL))
-                            .header(
-                                Row::new(vec!["Name", "Format", "Size", "Cache"])
-                                    .style(Style::default().fg(Color::Cyan)),
+                            tracks_table_state.select(draw_data.current_track_index);
+                            f.render_stateful_widget(
+                                tracks_table(&draw_data),
+                                chunks[2],
+                                tracks_table_state,
                             );
-                            f.render_widget(table, chunks[2]);
                         }
                         _ => {
                             let status = match draw_data.playback_state {
@@ -327,7 +403,7 @@ impl App {
                     }
 
                     let help_text = format!(
-                        "{} | Tab: Switch | ↑↓/jk: Navigate | Enter: Play | Space: Play/Pause | +/-: Volume | q: Quit",
+                        "{} | Tab: Switch | ↑↓/jk: Navigate | PgUp/PgDn: Page | Enter: Play | Space: Play/Pause | +/-: Volume | q: Quit",
                         draw_data.status_message
                     );
                     let help = Paragraph::new(help_text).style(Style::default().fg(Color::Gray));
@@ -344,6 +420,7 @@ impl App {
     fn load_data(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.repositories = self.database.get_repositories()?;
         self.tracks = self.database.get_all_tracks()?;
+        self.select_track_index(self.current_track_index);
         Ok(())
     }
 
@@ -368,29 +445,21 @@ impl App {
                 if self.selected_tab == 0 {
                     // Navigate repositories - not implemented yet
                 } else if self.selected_tab == 1 {
-                    // Navigate tracks up
-                    if let Some(current) = self.current_track_index {
-                        if current > 0 {
-                            self.current_track_index = Some(current - 1);
-                        }
-                    } else if !self.tracks.is_empty() {
-                        self.current_track_index = Some(0);
-                    }
+                    self.select_previous_track(1);
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if self.selected_tab == 0 {
                     // Navigate repositories - not implemented yet
                 } else if self.selected_tab == 1 {
-                    // Navigate tracks down
-                    if let Some(current) = self.current_track_index {
-                        if current < self.tracks.len() - 1 {
-                            self.current_track_index = Some(current + 1);
-                        }
-                    } else if !self.tracks.is_empty() {
-                        self.current_track_index = Some(0);
-                    }
+                    self.select_next_track(1);
                 }
+            }
+            KeyCode::PageUp if self.selected_tab == 1 => {
+                self.select_previous_track(self.tracks_page_step);
+            }
+            KeyCode::PageDown if self.selected_tab == 1 => {
+                self.select_next_track(self.tracks_page_step);
             }
             KeyCode::Enter if self.selected_tab == 1 && !self.tracks.is_empty() => {
                 if let Some(index) = self.current_track_index {
@@ -423,7 +492,7 @@ impl App {
 
     fn queue_track(&mut self, index: usize) -> Result<(), Box<dyn std::error::Error>> {
         if index < self.tracks.len() {
-            self.current_track_index = Some(index);
+            self.select_track_index(Some(index));
             let track = self.tracks[index].clone();
 
             if track.is_playable() {
@@ -497,7 +566,7 @@ impl App {
                             let track = pending.track.clone();
                             self.audio_player
                                 .load_streaming_track(track.clone(), decoder)?;
-                            self.current_track_index = Some(pending.track_index);
+                            self.select_track_index(Some(pending.track_index));
                             let pending = PendingPlayback {
                                 track_index: pending.track_index,
                                 track,
@@ -585,6 +654,24 @@ impl App {
         Ok(())
     }
 
+    fn select_track_index(&mut self, index: Option<usize>) {
+        let index = index
+            .filter(|_| !self.tracks.is_empty())
+            .map(|index| index.min(self.tracks.len() - 1));
+        self.current_track_index = index;
+        self.tracks_table_state.select(index);
+    }
+
+    fn select_next_track(&mut self, step: usize) {
+        let index = next_track_index(self.current_track_index, self.tracks.len(), step);
+        self.select_track_index(index);
+    }
+
+    fn select_previous_track(&mut self, step: usize) {
+        let index = previous_track_index(self.current_track_index, self.tracks.len(), step);
+        self.select_track_index(index);
+    }
+
     #[allow(dead_code)]
     fn draw_with_data(&self, f: &mut Frame<'_>, data: DrawData<'_>) {
         let chunks = Layout::default()
@@ -668,42 +755,7 @@ impl App {
     fn draw_tracks(&self, f: &mut Frame, area: ratatui::layout::Rect, data: &DrawData<'_>) {
         let block = Block::default().title("Tracks").borders(Borders::ALL);
 
-        let rows: Vec<Row> = data
-            .tracks
-            .iter()
-            .enumerate()
-            .map(|(i, track)| {
-                let mut row = Row::new(vec![
-                    track.name.clone(),
-                    track.format.clone(),
-                    format!("{}MB", track.size / 1024 / 1024),
-                    cache_label(track, Some(i) == data.caching_track_index),
-                ]);
-
-                if Some(i) == data.current_track_index {
-                    row = row.style(Style::default().fg(Color::Yellow));
-                }
-
-                row
-            })
-            .collect();
-
-        let table = Table::new(
-            rows,
-            &[
-                Constraint::Percentage(55),
-                Constraint::Percentage(15),
-                Constraint::Percentage(15),
-                Constraint::Percentage(15),
-            ],
-        )
-        .block(block)
-        .header(
-            Row::new(vec!["Name", "Format", "Size", "Cache"])
-                .style(Style::default().fg(Color::Cyan)),
-        );
-
-        f.render_widget(table, area);
+        f.render_widget(tracks_table(data).block(block), area);
     }
 
     #[allow(dead_code)]
@@ -732,7 +784,7 @@ impl App {
     #[allow(dead_code)]
     fn draw_footer(&self, f: &mut Frame, area: ratatui::layout::Rect, _data: &DrawData<'_>) {
         let help_text = format!(
-            "{} | Tab: Switch | ↑↓/jk: Navigate | Enter: Play | Space: Play/Pause | +/-: Volume | q: Quit",
+            "{} | Tab: Switch | ↑↓/jk: Navigate | PgUp/PgDn: Page | Enter: Play | Space: Play/Pause | +/-: Volume | q: Quit",
             self.status_message
         );
         let paragraph = Paragraph::new(help_text).style(Style::default().fg(Color::Gray));
