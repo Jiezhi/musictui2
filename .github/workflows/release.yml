@@ -4,12 +4,21 @@ on:
   push:
     tags:
       - "v*"
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v0.1.0"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name || github.ref_name }}
 
 jobs:
   build:
@@ -35,6 +44,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -58,19 +69,20 @@ jobs:
       - name: Package Unix binary
         if: matrix.archive == 'tar.gz'
         env:
-          ASSET_NAME: musictui2-${{ github.ref_name }}-${{ matrix.name }}
+          ASSET_NAME: musictui2-${{ env.RELEASE_TAG }}-${{ matrix.name }}
         run: |
           mkdir -p dist package
           cp target/release/musictui2 package/musictui2
           chmod +x package/musictui2
           tar -C package -czf "dist/${ASSET_NAME}.tar.gz" musictui2
-          shasum -a 256 "dist/${ASSET_NAME}.tar.gz" > "dist/${ASSET_NAME}.tar.gz.sha256"
+          cd dist
+          shasum -a 256 "${ASSET_NAME}.tar.gz" > "${ASSET_NAME}.tar.gz.sha256"
 
       - name: Package Windows binary
         if: matrix.archive == 'zip'
         shell: pwsh
         env:
-          ASSET_NAME: musictui2-${{ github.ref_name }}-${{ matrix.name }}
+          ASSET_NAME: musictui2-${{ env.RELEASE_TAG }}-${{ matrix.name }}
         run: |
           New-Item -ItemType Directory -Force -Path dist, package
           Copy-Item target/release/musictui2.exe package/musictui2.exe
@@ -100,4 +112,9 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release-assets/* --generate-notes --verify-tag
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+          else
+            gh release create "$RELEASE_TAG" release-assets/* --generate-notes --verify-tag
+          fi
