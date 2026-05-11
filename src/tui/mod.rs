@@ -5,7 +5,7 @@ use crate::events::EventBus;
 use crate::github::GitHubScanner;
 use crate::models::{PlaybackState, Repository, Track};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute, terminal,
 };
 use ratatui::{
@@ -167,6 +167,10 @@ fn pending_status(action: &str, pending: &PendingPlayback, track_name: &str) -> 
 fn track_page_step_for_area(area: Rect) -> usize {
     // Tracks table height minus top/bottom borders and the header row.
     usize::from(area.height.saturating_sub(3).max(1))
+}
+
+fn should_handle_key_event(kind: KeyEventKind) -> bool {
+    matches!(kind, KeyEventKind::Press | KeyEventKind::Repeat)
 }
 
 fn next_track_index(current: Option<usize>, len: usize, step: usize) -> Option<usize> {
@@ -416,8 +420,10 @@ impl App {
         while !self.should_quit {
             if let Ok(true) = event::poll(tick_rate) {
                 if let Event::Key(key) = event::read()? {
-                    if let Err(err) = self.handle_key_event(key).await {
-                        self.show_error(&err.to_string());
+                    if should_handle_key_event(key.kind) {
+                        if let Err(err) = self.handle_key_event(key).await {
+                            self.show_error(&err.to_string());
+                        }
                     }
                 }
             }
@@ -1158,6 +1164,13 @@ mod tests {
     fn track_page_step_matches_visible_table_rows() {
         assert_eq!(track_page_step_for_area(Rect::new(0, 0, 80, 20)), 17);
         assert_eq!(track_page_step_for_area(Rect::new(0, 0, 80, 2)), 1);
+    }
+
+    #[test]
+    fn key_event_filter_ignores_windows_key_release_events() {
+        assert!(should_handle_key_event(KeyEventKind::Press));
+        assert!(should_handle_key_event(KeyEventKind::Repeat));
+        assert!(!should_handle_key_event(KeyEventKind::Release));
     }
 
     #[test]
