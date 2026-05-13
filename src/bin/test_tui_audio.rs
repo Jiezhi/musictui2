@@ -22,6 +22,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         local_path: None,
         downloaded: false,
         discovered_at: chrono::Utc::now(),
+        favorite: false,
+        blacklisted: false,
     };
 
     println!("\n1. Testing track loading without download...");

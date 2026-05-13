@@ -108,6 +108,62 @@ impl Cli {
             Ok(self.database.get_all_tracks()?)
         }
     }
+
+    pub async fn list_favorite_tracks(
+        &self,
+        repo_identifier: Option<&str>,
+    ) -> Result<Vec<Track>, Box<dyn std::error::Error>> {
+        let tracks = if repo_identifier.is_some() {
+            self.list_tracks(repo_identifier).await?
+        } else {
+            self.database.get_favorite_tracks()?
+        };
+
+        Ok(tracks
+            .into_iter()
+            .filter(|track| track.favorite && !track.blacklisted)
+            .collect())
+    }
+
+    pub async fn list_blacklisted_tracks(
+        &self,
+        repo_identifier: Option<&str>,
+    ) -> Result<Vec<Track>, Box<dyn std::error::Error>> {
+        let tracks = if repo_identifier.is_some() {
+            self.list_tracks(repo_identifier).await?
+        } else {
+            self.database.get_blacklisted_tracks()?
+        };
+
+        Ok(tracks
+            .into_iter()
+            .filter(|track| track.blacklisted)
+            .collect())
+    }
+
+    pub async fn set_track_favorite(
+        &self,
+        track_id: i64,
+        favorite: bool,
+    ) -> Result<Track, Box<dyn std::error::Error>> {
+        let track = self.database.get_track_by_id(track_id)?;
+        if track.blacklisted && favorite {
+            return Err("Blacklisted tracks cannot be favorited. Unblock the track first.".into());
+        }
+
+        self.database.set_track_favorite(track_id, favorite)?;
+        Ok(self.database.get_track_by_id(track_id)?)
+    }
+
+    pub async fn set_track_blacklisted(
+        &self,
+        track_id: i64,
+        blacklisted: bool,
+    ) -> Result<Track, Box<dyn std::error::Error>> {
+        self.database.get_track_by_id(track_id)?;
+        self.database.set_track_blacklisted(track_id, blacklisted)?;
+        Ok(self.database.get_track_by_id(track_id)?)
+    }
 }
 
 fn parse_repository_url(url: &str) -> Result<(String, String), Box<dyn std::error::Error>> {

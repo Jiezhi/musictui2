@@ -128,6 +128,8 @@ impl GitHubApiClient {
                                     local_path: None,
                                     downloaded: false,
                                     discovered_at: Utc::now(),
+                                    favorite: false,
+                                    blacklisted: false,
                                 });
                             }
                         }

@@ -33,6 +33,8 @@ fn test_track_creation() {
         downloaded: false,
         local_path: None,
         discovered_at: chrono::Utc::now(),
+        favorite: false,
+        blacklisted: false,
     };
 
     assert_eq!(track.id, 1);
@@ -71,6 +73,8 @@ fn test_track_is_playable() {
         downloaded: false,
         local_path: None,
         discovered_at: chrono::Utc::now(),
+        favorite: false,
+        blacklisted: false,
     };
     assert!(!track1.is_playable());
 
@@ -87,6 +91,8 @@ fn test_track_is_playable() {
         downloaded: true,
         local_path: Some(temp_path.clone()),
         discovered_at: chrono::Utc::now(),
+        favorite: false,
+        blacklisted: false,
     };
     assert!(track2.is_playable());
 
@@ -103,6 +109,8 @@ fn test_track_is_playable() {
         downloaded: true,
         local_path: Some(PathBuf::from("/non/existent/file.mp3")),
         discovered_at: chrono::Utc::now(),
+        favorite: false,
+        blacklisted: false,
     };
     assert!(!track3.is_playable());
 
@@ -119,6 +127,8 @@ fn test_track_is_playable() {
         downloaded: true,
         local_path: None,
         discovered_at: chrono::Utc::now(),
+        favorite: false,
+        blacklisted: false,
     };
     assert!(!track4.is_playable());
 

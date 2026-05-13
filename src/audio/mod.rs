@@ -348,6 +348,8 @@ mod tests {
             local_path: None,
             downloaded: false,
             discovered_at: chrono::Utc::now(),
+            favorite: false,
+            blacklisted: false,
         };
 
         assert!(!track.is_playable());

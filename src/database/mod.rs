@@ -51,6 +51,8 @@ impl DatabaseManager {
                 local_path TEXT,
                 downloaded BOOLEAN DEFAULT FALSE,
                 discovered_at DATETIME,
+                favorite BOOLEAN DEFAULT FALSE,
+                blacklisted BOOLEAN DEFAULT FALSE,
                 FOREIGN KEY(repository_id) REFERENCES repositories(id)
             )",
             [],
@@ -75,6 +77,20 @@ impl DatabaseManager {
 
         if !Self::has_column(&conn, "tracks", "discovered_at")? {
             conn.execute("ALTER TABLE tracks ADD COLUMN discovered_at DATETIME", [])?;
+        }
+
+        if !Self::has_column(&conn, "tracks", "favorite")? {
+            conn.execute(
+                "ALTER TABLE tracks ADD COLUMN favorite BOOLEAN DEFAULT FALSE",
+                [],
+            )?;
+        }
+
+        if !Self::has_column(&conn, "tracks", "blacklisted")? {
+            conn.execute(
+                "ALTER TABLE tracks ADD COLUMN blacklisted BOOLEAN DEFAULT FALSE",
+                [],
+            )?;
         }
 
         let missing_discovered_at: i64 = conn.query_row(
@@ -199,8 +215,8 @@ impl DatabaseManager {
 
         conn.execute(
             "INSERT INTO tracks (
-                repository_id, path, name, format, size, duration, url, local_path, downloaded, discovered_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                repository_id, path, name, format, size, duration, url, local_path, downloaded, discovered_at, favorite, blacklisted
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             ON CONFLICT(repository_id, path) DO UPDATE SET
                 name = excluded.name,
                 format = excluded.format,
@@ -209,7 +225,9 @@ impl DatabaseManager {
                 url = excluded.url,
                 local_path = COALESCE(excluded.local_path, tracks.local_path),
                 downloaded = tracks.downloaded OR excluded.downloaded,
-                discovered_at = tracks.discovered_at",
+                discovered_at = tracks.discovered_at,
+                favorite = tracks.favorite OR excluded.favorite,
+                blacklisted = tracks.blacklisted OR excluded.blacklisted",
             params![
                 track.repository_id,
                 track.path,
@@ -221,6 +239,8 @@ impl DatabaseManager {
                 local_path,
                 track.downloaded,
                 track.discovered_at,
+                track.favorite,
+                track.blacklisted,
             ],
         )?;
 
@@ -230,7 +250,7 @@ impl DatabaseManager {
     pub fn get_tracks_by_repo(&self, repository_id: i64) -> Result<Vec<Track>> {
         let conn = self.connection.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, repository_id, path, name, format, size, duration, url, local_path, downloaded, discovered_at
+            "SELECT id, repository_id, path, name, format, size, duration, url, local_path, downloaded, discovered_at, favorite, blacklisted
              FROM tracks
              WHERE repository_id = ?1
              ORDER BY name",
@@ -253,6 +273,8 @@ impl DatabaseManager {
                 local_path: local_path.map(Into::into),
                 downloaded: row.get(9)?,
                 discovered_at,
+                favorite: row.get(11)?,
+                blacklisted: row.get(12)?,
             })
         })?;
 
@@ -310,7 +332,7 @@ impl DatabaseManager {
     pub fn get_track_by_id(&self, track_id: i64) -> Result<Track> {
         let conn = self.connection.lock().unwrap();
         conn.query_row(
-            "SELECT id, repository_id, path, name, format, size, duration, url, local_path, downloaded, discovered_at
+            "SELECT id, repository_id, path, name, format, size, duration, url, local_path, downloaded, discovered_at, favorite, blacklisted
              FROM tracks
              WHERE id = ?1",
             params![track_id],
@@ -331,6 +353,8 @@ impl DatabaseManager {
                     local_path: local_path.map(Into::into),
                     downloaded: row.get(9)?,
                     discovered_at,
+                    favorite: row.get(11)?,
+                    blacklisted: row.get(12)?,
                 })
             },
         )
@@ -339,7 +363,7 @@ impl DatabaseManager {
     pub fn get_all_tracks(&self) -> Result<Vec<Track>> {
         let conn = self.connection.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, repository_id, path, name, format, size, duration, url, local_path, downloaded, discovered_at
+            "SELECT id, repository_id, path, name, format, size, duration, url, local_path, downloaded, discovered_at, favorite, blacklisted
              FROM tracks
              ORDER BY name",
         )?;
@@ -361,10 +385,51 @@ impl DatabaseManager {
                 local_path: local_path.map(Into::into),
                 downloaded: row.get(9)?,
                 discovered_at,
+                favorite: row.get(11)?,
+                blacklisted: row.get(12)?,
             })
         })?;
 
         tracks.collect()
+    }
+
+    pub fn set_track_favorite(&self, track_id: i64, favorite: bool) -> Result<()> {
+        let conn = self.connection.lock().unwrap();
+        conn.execute(
+            "UPDATE tracks SET favorite = ?1 WHERE id = ?2",
+            params![favorite, track_id],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn set_track_blacklisted(&self, track_id: i64, blacklisted: bool) -> Result<()> {
+        let conn = self.connection.lock().unwrap();
+        conn.execute(
+            "UPDATE tracks
+             SET blacklisted = ?1,
+                 favorite = CASE WHEN ?1 THEN FALSE ELSE favorite END
+             WHERE id = ?2",
+            params![blacklisted, track_id],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn get_favorite_tracks(&self) -> Result<Vec<Track>> {
+        let tracks = self.get_all_tracks()?;
+        Ok(tracks
+            .into_iter()
+            .filter(|track| track.favorite && !track.blacklisted)
+            .collect())
+    }
+
+    pub fn get_blacklisted_tracks(&self) -> Result<Vec<Track>> {
+        let tracks = self.get_all_tracks()?;
+        Ok(tracks
+            .into_iter()
+            .filter(|track| track.blacklisted)
+            .collect())
     }
 }
 
@@ -457,6 +522,8 @@ mod tests {
         assert_eq!(repos[0].track_count, 0);
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].name, "song.mp3");
+        assert!(!tracks[0].favorite);
+        assert!(!tracks[0].blacklisted);
     }
 
     #[test]
@@ -490,6 +557,8 @@ mod tests {
             local_path: None,
             downloaded: false,
             discovered_at: Utc::now(),
+            favorite: false,
+            blacklisted: false,
         };
         db.save_track(&track).unwrap();
 
@@ -531,6 +600,8 @@ mod tests {
             local_path: None,
             downloaded: false,
             discovered_at: Utc::now(),
+            favorite: false,
+            blacklisted: false,
         };
 
         db.save_track(&track).unwrap();
@@ -573,6 +644,8 @@ mod tests {
             local_path: None,
             downloaded: false,
             discovered_at: Utc::now(),
+            favorite: false,
+            blacklisted: false,
         };
 
         db.save_track(&track).unwrap();
@@ -583,5 +656,61 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(db.get_repository_by_name("owner", "repo").is_err());
+    }
+
+    #[test]
+    fn track_favorite_and_blacklist_flags_are_persisted() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("music.db");
+        let db = DatabaseManager::from_path(&db_path).unwrap();
+
+        let repository = Repository {
+            id: 0,
+            owner: "owner".to_string(),
+            name: "repo".to_string(),
+            url: "https://github.com/owner/repo".to_string(),
+            added_at: Utc::now(),
+            last_scanned: None,
+            track_count: 0,
+        };
+
+        db.save_repository(&repository).unwrap();
+        let saved_repository = db.get_repository_by_name("owner", "repo").unwrap();
+
+        let mut track = Track {
+            id: 0,
+            repository_id: saved_repository.id,
+            path: "song.mp3".to_string(),
+            name: "song.mp3".to_string(),
+            format: "mp3".to_string(),
+            size: 1024,
+            duration: None,
+            url: "https://example.com/song.mp3".to_string(),
+            local_path: None,
+            downloaded: false,
+            discovered_at: Utc::now(),
+            favorite: true,
+            blacklisted: false,
+        };
+
+        db.save_track(&track).unwrap();
+        let saved_track = db.get_tracks_by_repo(saved_repository.id).unwrap()[0].clone();
+        assert!(saved_track.favorite);
+        assert!(!saved_track.blacklisted);
+
+        db.set_track_blacklisted(saved_track.id, true).unwrap();
+        let blacklisted_track = db.get_track_by_id(saved_track.id).unwrap();
+        assert!(!blacklisted_track.favorite);
+        assert!(blacklisted_track.blacklisted);
+        assert!(db.get_favorite_tracks().unwrap().is_empty());
+        assert_eq!(db.get_blacklisted_tracks().unwrap().len(), 1);
+
+        track.size = 2048;
+        track.favorite = false;
+        track.blacklisted = false;
+        db.save_track(&track).unwrap();
+
+        let rescanned_track = db.get_track_by_id(saved_track.id).unwrap();
+        assert!(rescanned_track.blacklisted);
     }
 }

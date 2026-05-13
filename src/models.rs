@@ -26,6 +26,8 @@ pub struct Track {
     pub local_path: Option<PathBuf>,
     pub downloaded: bool,
     pub discovered_at: DateTime<Utc>,
+    pub favorite: bool,
+    pub blacklisted: bool,
 }
 
 impl Track {

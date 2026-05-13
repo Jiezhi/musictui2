@@ -67,6 +67,32 @@ enum Commands {
         /// Repository to filter tracks (optional)
         #[arg(short, long)]
         repository: Option<String>,
+        /// Show only favorite tracks
+        #[arg(long, conflicts_with = "blacklisted")]
+        favorites: bool,
+        /// Show only blacklisted tracks
+        #[arg(long)]
+        blacklisted: bool,
+    },
+    /// Mark a track as favorite
+    Favorite {
+        /// Track ID to favorite
+        track_id: i64,
+    },
+    /// Remove a track from favorites
+    Unfavorite {
+        /// Track ID to unfavorite
+        track_id: i64,
+    },
+    /// Hide a track from normal playback lists
+    Blacklist {
+        /// Track ID to blacklist
+        track_id: i64,
+    },
+    /// Restore a blacklisted track
+    Unblacklist {
+        /// Track ID to restore
+        track_id: i64,
     },
     /// Launch TUI mode
     Tui,
@@ -123,17 +149,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let track = cli.download_track(track_id).await?;
             println!("Downloaded: {} to {:?}", track.name, track.local_path);
         }
-        Commands::ListTracks { repository } => {
-            let tracks = cli.list_tracks(repository.as_deref()).await?;
+        Commands::ListTracks {
+            repository,
+            favorites,
+            blacklisted,
+        } => {
+            let tracks: Vec<_> = if favorites {
+                cli.list_favorite_tracks(repository.as_deref()).await?
+            } else if blacklisted {
+                cli.list_blacklisted_tracks(repository.as_deref()).await?
+            } else {
+                cli.list_tracks(repository.as_deref())
+                    .await?
+                    .into_iter()
+                    .filter(|track| !track.blacklisted)
+                    .collect()
+            };
+
             println!("Found {} tracks:", tracks.len());
             for track in tracks {
-                let status = if track.downloaded {
+                let mut status = Vec::new();
+                status.push(if track.downloaded {
                     "Downloaded"
                 } else {
                     "Not downloaded"
-                };
-                println!("  - {} (ID: {}) - {}", track.name, track.id, status);
+                });
+                if track.favorite {
+                    status.push("Favorite");
+                }
+                if track.blacklisted {
+                    status.push("Blacklisted");
+                }
+                println!(
+                    "  - {} (ID: {}) - {}",
+                    track.name,
+                    track.id,
+                    status.join(", ")
+                );
             }
+        }
+        Commands::Favorite { track_id } => {
+            let track = cli.set_track_favorite(track_id, true).await?;
+            println!("Favorited: {} (ID: {})", track.name, track.id);
+        }
+        Commands::Unfavorite { track_id } => {
+            let track = cli.set_track_favorite(track_id, false).await?;
+            println!("Removed from favorites: {} (ID: {})", track.name, track.id);
+        }
+        Commands::Blacklist { track_id } => {
+            let track = cli.set_track_blacklisted(track_id, true).await?;
+            println!("Blacklisted: {} (ID: {})", track.name, track.id);
+        }
+        Commands::Unblacklist { track_id } => {
+            let track = cli.set_track_blacklisted(track_id, false).await?;
+            println!("Restored: {} (ID: {})", track.name, track.id);
         }
         Commands::Tui => {
             tui::run(event_bus).await?;

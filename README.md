@@ -71,7 +71,13 @@ Work with tracks:
 ```bash
 cargo run --release --bin musictui2 -- list-tracks
 cargo run --release --bin musictui2 -- list-tracks --repository owner/repo
+cargo run --release --bin musictui2 -- list-tracks --favorites
+cargo run --release --bin musictui2 -- list-tracks --blacklisted
 cargo run --release --bin musictui2 -- download <track-id>
+cargo run --release --bin musictui2 -- favorite <track-id>
+cargo run --release --bin musictui2 -- unfavorite <track-id>
+cargo run --release --bin musictui2 -- blacklist <track-id>
+cargo run --release --bin musictui2 -- unblacklist <track-id>
 ```
 
 Refresh a repository scan:
@@ -93,11 +99,14 @@ musictui2 list-tracks
 - `Tab` / `Shift+Tab` or `n` / `p`: switch tabs
 - `j` / `Down`: move down in the active list
 - `k` / `Up`: move up in the active list
-- `PageUp` / `PageDown` or `Ctrl+B` / `Ctrl+F`: page through the Tracks tab
-- `Enter`: play the selected track
+- `PageUp` / `PageDown` or `Ctrl+B` / `Ctrl+F`: page through track lists
+- `/`: search the active track list by name, pinyin, or initials
+- `Enter`: play the selected track in Tracks or Favorites
+- `f`: add or remove the selected track from Favorites
+- `x`: add the selected track to Blacklist, or restore it from the Blacklist tab
 - `Space`: play or pause
-- `m`: switch between sequential and shuffle playback in the Tracks tab
-- `.` / `,`: play the next or previous track in the Tracks tab
+- `m`: switch between sequential and shuffle playback in track lists
+- `.` / `,`: play the next or previous track in Tracks or Favorites
 - `d`: delete the selected repository from the Repositories tab; press `d` again to confirm
 - `Esc`: cancel a pending repository delete confirmation
 - `+` / `-`: adjust volume
