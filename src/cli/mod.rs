@@ -6,13 +6,14 @@ use crate::cache::CacheManager;
 use crate::database::DatabaseManager;
 use crate::events::EventBus;
 use crate::github::GitHubScanner;
-use crate::models::{Repository, Track};
+use crate::models::{Repository, RepositorySource, Track};
+use crate::webdav::WebDavScanner;
 
 pub struct Cli {
     _event_bus: EventBus,
     github_scanner: Arc<GitHubScanner>,
     database: Arc<DatabaseManager>,
-    _cache: Arc<CacheManager>,
+    cache: Arc<CacheManager>,
 }
 
 impl Cli {
@@ -25,7 +26,7 @@ impl Cli {
             _event_bus: event_bus,
             github_scanner,
             database,
-            _cache: cache,
+            cache,
         }
     }
 
@@ -37,6 +38,10 @@ impl Cli {
             owner: owner.clone(),
             name: repo_name.clone(),
             url: format!("https://github.com/{owner}/{repo_name}"),
+            source_type: RepositorySource::GitHub,
+            cache_enabled: true,
+            username: None,
+            password: None,
             added_at: Utc::now(),
             last_scanned: None,
             track_count: 0,
@@ -49,6 +54,40 @@ impl Cli {
         Ok(())
     }
 
+    pub async fn add_webdav_source(
+        &self,
+        name: &str,
+        url: &str,
+        username: Option<&str>,
+        password: Option<&str>,
+        cache_enabled: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let scanner = WebDavScanner::new(
+            self.database.clone(),
+            self.cache.clone(),
+            username.map(ToString::to_string),
+            password.map(ToString::to_string),
+        );
+        let repository = scanner
+            .add_source(
+                name,
+                url,
+                username.map(ToString::to_string),
+                password.map(ToString::to_string),
+                cache_enabled,
+            )
+            .await?;
+        let tracks = scanner.scan_repository(&repository).await?;
+        self.database.update_last_scanned_by_id(repository.id)?;
+
+        println!("Found {} audio files:", tracks.len());
+        for track in tracks {
+            println!("  - {} (ID: {})", track.path, track.id);
+        }
+
+        Ok(())
+    }
+
     pub async fn list_repositories(&self) -> Result<Vec<Repository>, Box<dyn std::error::Error>> {
         Ok(self.database.get_repositories()?)
     }
@@ -57,8 +96,8 @@ impl Cli {
         &self,
         repo_identifier: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if let Ok(id) = repo_identifier.parse::<i64>() {
-            self.github_scanner.delete_repository(id)?;
+        if let Some(repository) = self.find_repository(repo_identifier)? {
+            self.github_scanner.delete_repository(repository.id)?;
             return Ok(());
         }
 
@@ -73,6 +112,20 @@ impl Cli {
         &self,
         repo_identifier: &str,
     ) -> Result<Vec<Track>, Box<dyn std::error::Error>> {
+        if let Some(repository) = self.find_repository(repo_identifier)? {
+            if repository.source_type == RepositorySource::WebDav {
+                let scanner = WebDavScanner::new(
+                    self.database.clone(),
+                    self.cache.clone(),
+                    repository.username.clone(),
+                    repository.password.clone(),
+                );
+                let tracks = scanner.scan_repository(&repository).await?;
+                self.database.update_last_scanned_by_id(repository.id)?;
+                return Ok(tracks);
+            }
+        }
+
         let (owner, repo_name) = parse_repository_url(repo_identifier)?;
         let tracks = self
             .github_scanner
@@ -86,12 +139,26 @@ impl Cli {
 
     pub async fn download_track(&self, track_id: i64) -> Result<Track, Box<dyn std::error::Error>> {
         let track = self.database.get_track_by_id(track_id)?;
-        let local_path = self.github_scanner.download_track(&track).await?;
+        let repository = self.database.get_repository_by_id(track.repository_id)?;
+        let local_path = match repository.source_type {
+            RepositorySource::GitHub => self.github_scanner.download_track(&track).await?,
+            RepositorySource::WebDav => {
+                let scanner = WebDavScanner::new(
+                    self.database.clone(),
+                    self.cache.clone(),
+                    repository.username.clone(),
+                    repository.password.clone(),
+                );
+                scanner
+                    .download_track(&track, repository.cache_enabled)
+                    .await?
+            }
+        };
 
         // Update track with local path
         let mut updated_track = track.clone();
         updated_track.local_path = Some(local_path);
-        updated_track.downloaded = true;
+        updated_track.downloaded = repository.cache_enabled;
         self.database.save_track(&updated_track)?;
 
         Ok(updated_track)
@@ -102,6 +169,10 @@ impl Cli {
         repo_identifier: Option<&str>,
     ) -> Result<Vec<Track>, Box<dyn std::error::Error>> {
         if let Some(repo_identifier) = repo_identifier {
+            if let Some(repository) = self.find_repository(repo_identifier)? {
+                return Ok(self.database.get_tracks_by_repo(repository.id)?);
+            }
+
             let (owner, repo_name) = parse_repository_url(repo_identifier)?;
             Ok(self.database.get_tracks_by_repo_name(&owner, &repo_name)?)
         } else {
@@ -163,6 +234,28 @@ impl Cli {
         self.database.get_track_by_id(track_id)?;
         self.database.set_track_blacklisted(track_id, blacklisted)?;
         Ok(self.database.get_track_by_id(track_id)?)
+    }
+
+    fn find_repository(
+        &self,
+        repo_identifier: &str,
+    ) -> Result<Option<Repository>, Box<dyn std::error::Error>> {
+        if let Ok(id) = repo_identifier.parse::<i64>() {
+            return match self.database.get_repository_by_id(id) {
+                Ok(repository) => Ok(Some(repository)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(err) => Err(err.into()),
+            };
+        }
+
+        match self
+            .database
+            .get_repository_by_name("webdav", repo_identifier)
+        {
+            Ok(repository) => Ok(Some(repository)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
     }
 }
 

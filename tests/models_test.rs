@@ -1,4 +1,4 @@
-use musictui2::models::{PlaybackState, Repository, Track};
+use musictui2::models::{PlaybackState, Repository, RepositorySource, Track};
 use std::path::PathBuf;
 
 #[test]
@@ -8,6 +8,10 @@ fn test_repository_creation() {
         name: "test-repo".to_string(),
         owner: "test-owner".to_string(),
         url: "https://github.com/test-owner/test-repo".to_string(),
+        source_type: RepositorySource::GitHub,
+        cache_enabled: true,
+        username: None,
+        password: None,
         added_at: chrono::Utc::now(),
         last_scanned: None,
         track_count: 0,

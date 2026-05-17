@@ -9,7 +9,7 @@ use tokio::time::{sleep, Duration};
 
 use crate::cache::{CacheManager, StreamingCacheState};
 use crate::database::DatabaseManager;
-use crate::models::{Repository, Track};
+use crate::models::{Repository, RepositorySource, Track};
 
 const MAX_GITHUB_REQUEST_ATTEMPTS: u32 = 3;
 
@@ -85,6 +85,10 @@ impl GitHubApiClient {
                 owner: owner.to_string(),
                 name: repo.name,
                 url: repo.html_url,
+                source_type: RepositorySource::GitHub,
+                cache_enabled: true,
+                username: None,
+                password: None,
                 added_at: Utc::now(),
                 last_scanned: None,
                 track_count: 0,
@@ -308,6 +312,10 @@ impl GitHubScanner {
                     owner: owner.to_string(),
                     name: repo_name.to_string(),
                     url: format!("https://github.com/{owner}/{repo_name}"),
+                    source_type: RepositorySource::GitHub,
+                    cache_enabled: true,
+                    username: None,
+                    password: None,
                     added_at: Utc::now(),
                     last_scanned: None,
                     track_count: 0,

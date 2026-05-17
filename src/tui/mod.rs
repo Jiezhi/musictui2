@@ -1,9 +1,10 @@
 use crate::audio::{prepare_streaming_decoder, AudioPlayer, StreamingDecoder};
-use crate::cache::StreamingCacheState;
+use crate::cache::{CacheManager, StreamingCacheState};
 use crate::database::DatabaseManager;
 use crate::events::EventBus;
 use crate::github::GitHubScanner;
-use crate::models::{PlaybackState, Repository, Track};
+use crate::models::{PlaybackState, Repository, RepositorySource, Track};
+use crate::webdav::WebDavScanner;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute, terminal,
@@ -504,6 +505,7 @@ pub struct App {
     database: Arc<DatabaseManager>,
     #[allow(dead_code)]
     github_scanner: Arc<GitHubScanner>,
+    cache: Arc<CacheManager>,
     pending_playback: Option<PendingPlayback>,
     status_message: String,
     track_search_query: String,
@@ -517,6 +519,7 @@ impl App {
         event_bus: EventBus,
         database: Arc<DatabaseManager>,
         github_scanner: Arc<GitHubScanner>,
+        cache: Arc<CacheManager>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let terminal = None;
         let audio_player = AudioPlayer::with_github_scanner(github_scanner.clone())?;
@@ -544,6 +547,7 @@ impl App {
             event_bus,
             database,
             github_scanner,
+            cache,
             pending_playback: None,
             status_message: "Ready".to_string(),
             track_search_query: String::new(),
@@ -1058,9 +1062,21 @@ impl App {
                 pending.cancel();
             }
 
-            let streaming_download = self
-                .github_scanner
-                .start_streaming_download(track.clone())?;
+            let repository = self.database.get_repository_by_id(track.repository_id)?;
+            let streaming_download = match repository.source_type {
+                RepositorySource::GitHub => self
+                    .github_scanner
+                    .start_streaming_download(track.clone())?,
+                RepositorySource::WebDav => {
+                    let scanner = WebDavScanner::new(
+                        self.database.clone(),
+                        self.cache.clone(),
+                        repository.username,
+                        repository.password,
+                    );
+                    scanner.start_streaming_download(track.clone(), repository.cache_enabled)?
+                }
+            };
             let decoder_cache_path = streaming_download.cache_path.clone();
             let decoder_cache_state = streaming_download.state.clone();
             let format = track.format.clone();
@@ -1666,8 +1682,8 @@ impl App {
 pub async fn run(event_bus: EventBus) -> Result<(), Box<dyn std::error::Error>> {
     let database = Arc::new(DatabaseManager::new());
     let cache = Arc::new(crate::cache::CacheManager::new());
-    let github_scanner = Arc::new(GitHubScanner::new(database.clone(), cache));
-    let mut app = App::new(event_bus, database, github_scanner)?;
+    let github_scanner = Arc::new(GitHubScanner::new(database.clone(), cache.clone()));
+    let mut app = App::new(event_bus, database, github_scanner, cache)?;
     app.run().await
 }
 

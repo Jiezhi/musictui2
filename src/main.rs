@@ -19,6 +19,7 @@ mod events;
 mod github;
 pub mod models;
 mod tui;
+mod webdav;
 
 use cli::Cli;
 use events::EventBus;
@@ -39,6 +40,22 @@ enum Commands {
     Add {
         /// GitHub repository URL or owner/repo format
         repository: String,
+    },
+    /// Add a WebDAV music source to the library
+    AddWebdav {
+        /// Display name for the WebDAV source
+        name: String,
+        /// WebDAV collection URL
+        url: String,
+        /// Username for basic authentication
+        #[arg(long)]
+        username: Option<String>,
+        /// Password for basic authentication
+        #[arg(long)]
+        password: Option<String>,
+        /// Cache WebDAV tracks after playback/download
+        #[arg(long)]
+        cache: bool,
     },
     /// List all added repositories
     List,
@@ -116,6 +133,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Add { repository } => {
             cli.add_repository(&repository).await?;
             println!("Added repository: {repository}");
+        }
+        Commands::AddWebdav {
+            name,
+            url,
+            username,
+            password,
+            cache,
+        } => {
+            cli.add_webdav_source(&name, &url, username.as_deref(), password.as_deref(), cache)
+                .await?;
+            let cache_status = if cache { "enabled" } else { "disabled" };
+            println!("Added WebDAV source: {name} (cache {cache_status})");
         }
         Commands::List => {
             let repos = cli.list_repositories().await?;

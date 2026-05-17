@@ -6,6 +6,7 @@ pub mod events;
 pub mod github;
 pub mod models;
 pub mod tui;
+pub mod webdav;
 
 #[cfg(test)]
 mod tests {

@@ -8,9 +8,40 @@ pub struct Repository {
     pub owner: String,
     pub name: String,
     pub url: String,
+    pub source_type: RepositorySource,
+    pub cache_enabled: bool,
+    pub username: Option<String>,
+    pub password: Option<String>,
     pub added_at: DateTime<Utc>,
     pub last_scanned: Option<DateTime<Utc>>,
     pub track_count: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub enum RepositorySource {
+    GitHub,
+    WebDav,
+}
+
+impl RepositorySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GitHub => "github",
+            Self::WebDav => "webdav",
+        }
+    }
+}
+
+impl std::str::FromStr for RepositorySource {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "github" => Ok(Self::GitHub),
+            "webdav" => Ok(Self::WebDav),
+            _ => Err(format!("Unknown repository source type: {value}")),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

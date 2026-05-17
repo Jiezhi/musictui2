@@ -31,6 +31,10 @@ impl DatabaseManager {
                 owner TEXT NOT NULL,
                 name TEXT NOT NULL,
                 url TEXT NOT NULL UNIQUE,
+                source_type TEXT NOT NULL DEFAULT 'github',
+                cache_enabled BOOLEAN DEFAULT TRUE,
+                username TEXT,
+                password TEXT,
                 added_at DATETIME NOT NULL,
                 last_scanned DATETIME,
                 track_count INTEGER DEFAULT 0
@@ -73,6 +77,28 @@ impl DatabaseManager {
                 "ALTER TABLE repositories ADD COLUMN track_count INTEGER DEFAULT 0",
                 [],
             )?;
+        }
+
+        if !Self::has_column(&conn, "repositories", "source_type")? {
+            conn.execute(
+                "ALTER TABLE repositories ADD COLUMN source_type TEXT NOT NULL DEFAULT 'github'",
+                [],
+            )?;
+        }
+
+        if !Self::has_column(&conn, "repositories", "cache_enabled")? {
+            conn.execute(
+                "ALTER TABLE repositories ADD COLUMN cache_enabled BOOLEAN DEFAULT TRUE",
+                [],
+            )?;
+        }
+
+        if !Self::has_column(&conn, "repositories", "username")? {
+            conn.execute("ALTER TABLE repositories ADD COLUMN username TEXT", [])?;
+        }
+
+        if !Self::has_column(&conn, "repositories", "password")? {
+            conn.execute("ALTER TABLE repositories ADD COLUMN password TEXT", [])?;
         }
 
         if !Self::has_column(&conn, "tracks", "discovered_at")? {
@@ -150,15 +176,23 @@ impl DatabaseManager {
     pub fn save_repository(&self, repository: &Repository) -> Result<()> {
         let conn = self.connection.lock().unwrap();
         conn.execute(
-            "INSERT INTO repositories (owner, name, url, added_at, last_scanned, track_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO repositories (owner, name, url, source_type, cache_enabled, username, password, added_at, last_scanned, track_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(url) DO UPDATE SET
                 owner = excluded.owner,
-                name = excluded.name",
+                name = excluded.name,
+                source_type = excluded.source_type,
+                cache_enabled = excluded.cache_enabled,
+                username = excluded.username,
+                password = excluded.password",
             params![
                 repository.owner,
                 repository.name,
                 repository.url,
+                repository.source_type.as_str(),
+                repository.cache_enabled,
+                repository.username,
+                repository.password,
                 repository.added_at,
                 repository.last_scanned,
                 repository.track_count,
@@ -171,20 +205,27 @@ impl DatabaseManager {
     pub fn get_repositories(&self) -> Result<Vec<Repository>> {
         let conn = self.connection.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, owner, name, url, added_at, last_scanned, track_count
+            "SELECT id, owner, name, url, source_type, cache_enabled, username, password, added_at, last_scanned, track_count
              FROM repositories
              ORDER BY added_at DESC",
         )?;
 
         let repositories = stmt.query_map([], |row| {
+            let source_type: String = row.get(4)?;
             Ok(Repository {
                 id: row.get(0)?,
                 owner: row.get(1)?,
                 name: row.get(2)?,
                 url: row.get(3)?,
-                added_at: row.get(4)?,
-                last_scanned: row.get(5)?,
-                track_count: row.get(6)?,
+                source_type: source_type
+                    .parse()
+                    .map_err(|err: String| rusqlite::Error::InvalidParameterName(err))?,
+                cache_enabled: row.get(5)?,
+                username: row.get(6)?,
+                password: row.get(7)?,
+                added_at: row.get(8)?,
+                last_scanned: row.get(9)?,
+                track_count: row.get(10)?,
             })
         })?;
 
@@ -306,27 +347,74 @@ impl DatabaseManager {
         Ok(())
     }
 
+    pub fn update_last_scanned_by_id(&self, repository_id: i64) -> Result<()> {
+        let conn = self.connection.lock().unwrap();
+        conn.execute(
+            "UPDATE repositories
+             SET last_scanned = ?1
+             WHERE id = ?2",
+            params![Utc::now(), repository_id],
+        )?;
+
+        Ok(())
+    }
+
     pub fn get_repository_by_name(&self, owner: &str, name: &str) -> Result<Repository> {
         let conn = self.connection.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, owner, name, url, added_at, last_scanned, track_count
+            "SELECT id, owner, name, url, source_type, cache_enabled, username, password, added_at, last_scanned, track_count
              FROM repositories
              WHERE owner = ?1 AND name = ?2",
         )?;
 
         let row = stmt.query_row(params![owner, name], |row| {
+            let source_type: String = row.get(4)?;
             Ok(Repository {
                 id: row.get(0)?,
                 owner: row.get(1)?,
                 name: row.get(2)?,
                 url: row.get(3)?,
-                added_at: row.get(4)?,
-                last_scanned: row.get(5)?,
-                track_count: row.get(6)?,
+                source_type: source_type
+                    .parse()
+                    .map_err(|err: String| rusqlite::Error::InvalidParameterName(err))?,
+                cache_enabled: row.get(5)?,
+                username: row.get(6)?,
+                password: row.get(7)?,
+                added_at: row.get(8)?,
+                last_scanned: row.get(9)?,
+                track_count: row.get(10)?,
             })
         })?;
 
         Ok(row)
+    }
+
+    pub fn get_repository_by_id(&self, repository_id: i64) -> Result<Repository> {
+        let conn = self.connection.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, owner, name, url, source_type, cache_enabled, username, password, added_at, last_scanned, track_count
+             FROM repositories
+             WHERE id = ?1",
+        )?;
+
+        stmt.query_row(params![repository_id], |row| {
+            let source_type: String = row.get(4)?;
+            Ok(Repository {
+                id: row.get(0)?,
+                owner: row.get(1)?,
+                name: row.get(2)?,
+                url: row.get(3)?,
+                source_type: source_type
+                    .parse()
+                    .map_err(|err: String| rusqlite::Error::InvalidParameterName(err))?,
+                cache_enabled: row.get(5)?,
+                username: row.get(6)?,
+                password: row.get(7)?,
+                added_at: row.get(8)?,
+                last_scanned: row.get(9)?,
+                track_count: row.get(10)?,
+            })
+        })
     }
 
     pub fn get_track_by_id(&self, track_id: i64) -> Result<Track> {
@@ -447,6 +535,22 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn test_repository() -> Repository {
+        Repository {
+            id: 0,
+            owner: "owner".to_string(),
+            name: "repo".to_string(),
+            url: "https://github.com/owner/repo".to_string(),
+            source_type: crate::models::RepositorySource::GitHub,
+            cache_enabled: true,
+            username: None,
+            password: None,
+            added_at: Utc::now(),
+            last_scanned: None,
+            track_count: 0,
+        }
+    }
+
     #[test]
     fn migrates_legacy_tracks_without_discovered_at() {
         let dir = tempdir().unwrap();
@@ -532,15 +636,8 @@ mod tests {
         let db_path = dir.path().join("music.db");
         let db = DatabaseManager::from_path(&db_path).unwrap();
 
-        let repository = Repository {
-            id: 0,
-            owner: "owner".to_string(),
-            name: "repo".to_string(),
-            url: "https://github.com/owner/repo".to_string(),
-            added_at: Utc::now(),
-            last_scanned: None,
-            track_count: 1,
-        };
+        let mut repository = test_repository();
+        repository.track_count = 1;
 
         db.save_repository(&repository).unwrap();
         let saved_repository = db.get_repository_by_name("owner", "repo").unwrap();
@@ -575,15 +672,7 @@ mod tests {
         let db_path = dir.path().join("music.db");
         let db = DatabaseManager::from_path(&db_path).unwrap();
 
-        let repository = Repository {
-            id: 0,
-            owner: "owner".to_string(),
-            name: "repo".to_string(),
-            url: "https://github.com/owner/repo".to_string(),
-            added_at: Utc::now(),
-            last_scanned: None,
-            track_count: 0,
-        };
+        let repository = test_repository();
 
         db.save_repository(&repository).unwrap();
         let saved_repository = db.get_repository_by_name("owner", "repo").unwrap();
@@ -619,15 +708,7 @@ mod tests {
         let db_path = dir.path().join("music.db");
         let db = DatabaseManager::from_path(&db_path).unwrap();
 
-        let repository = Repository {
-            id: 0,
-            owner: "owner".to_string(),
-            name: "repo".to_string(),
-            url: "https://github.com/owner/repo".to_string(),
-            added_at: Utc::now(),
-            last_scanned: None,
-            track_count: 0,
-        };
+        let repository = test_repository();
 
         db.save_repository(&repository).unwrap();
         let saved_repository = db.get_repository_by_name("owner", "repo").unwrap();
@@ -664,15 +745,7 @@ mod tests {
         let db_path = dir.path().join("music.db");
         let db = DatabaseManager::from_path(&db_path).unwrap();
 
-        let repository = Repository {
-            id: 0,
-            owner: "owner".to_string(),
-            name: "repo".to_string(),
-            url: "https://github.com/owner/repo".to_string(),
-            added_at: Utc::now(),
-            last_scanned: None,
-            track_count: 0,
-        };
+        let repository = test_repository();
 
         db.save_repository(&repository).unwrap();
         let saved_repository = db.get_repository_by_name("owner", "repo").unwrap();
