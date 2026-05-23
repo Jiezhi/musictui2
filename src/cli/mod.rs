@@ -3,6 +3,9 @@ use std::sync::Arc;
 use chrono::Utc;
 
 use crate::cache::CacheManager;
+use crate::credentials::{
+    resolve_webdav_password, store_webdav_password, CredentialStore, KeyringStore,
+};
 use crate::database::DatabaseManager;
 use crate::events::EventBus;
 use crate::github::GitHubScanner;
@@ -14,6 +17,7 @@ pub struct Cli {
     github_scanner: Arc<GitHubScanner>,
     database: Arc<DatabaseManager>,
     cache: Arc<CacheManager>,
+    credential_store: Arc<dyn CredentialStore>,
 }
 
 impl Cli {
@@ -27,6 +31,27 @@ impl Cli {
             github_scanner,
             database,
             cache,
+            credential_store: Arc::new(KeyringStore::new()),
+        }
+    }
+
+    /// Resolves the effective WebDAV password for a repository: keyring entry
+    /// first, then the inline value persisted in the DB (for back-compat with
+    /// pre-keyring installs).
+    fn webdav_password_for(&self, repository: &Repository) -> Option<String> {
+        match resolve_webdav_password(
+            &repository.name,
+            repository.password.as_deref(),
+            self.credential_store.as_ref(),
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to read WebDAV password from keyring for '{}': {err}. Falling back to inline value.",
+                    repository.name
+                );
+                repository.password.clone()
+            }
         }
     }
 
@@ -45,6 +70,7 @@ impl Cli {
             added_at: Utc::now(),
             last_scanned: None,
             track_count: 0,
+            tree_etag: None,
         };
 
         self.database.save_repository(&repository)?;
@@ -62,6 +88,24 @@ impl Cli {
         password: Option<&str>,
         cache_enabled: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // Prefer storing the password in the OS keyring; only persist it inline
+        // in SQLite when the keyring write fails (so the user is not locked
+        // out of their source).
+        let inline_password = match password {
+            None => None,
+            Some(value) => {
+                match store_webdav_password(name, value, self.credential_store.as_ref()) {
+                    Ok(()) => None,
+                    Err(err) => {
+                        eprintln!(
+                            "warning: failed to write WebDAV password to keyring for '{name}': {err}. Storing inline in the database as a fallback."
+                        );
+                        Some(value.to_string())
+                    }
+                }
+            }
+        };
+
         let scanner = WebDavScanner::new(
             self.database.clone(),
             self.cache.clone(),
@@ -73,7 +117,7 @@ impl Cli {
                 name,
                 url,
                 username.map(ToString::to_string),
-                password.map(ToString::to_string),
+                inline_password,
                 cache_enabled,
             )
             .await?;
@@ -114,11 +158,12 @@ impl Cli {
     ) -> Result<Vec<Track>, Box<dyn std::error::Error>> {
         if let Some(repository) = self.find_repository(repo_identifier)? {
             if repository.source_type == RepositorySource::WebDav {
+                let password = self.webdav_password_for(&repository);
                 let scanner = WebDavScanner::new(
                     self.database.clone(),
                     self.cache.clone(),
                     repository.username.clone(),
-                    repository.password.clone(),
+                    password,
                 );
                 let tracks = scanner.scan_repository(&repository).await?;
                 self.database.update_last_scanned_by_id(repository.id)?;
@@ -143,11 +188,12 @@ impl Cli {
         let local_path = match repository.source_type {
             RepositorySource::GitHub => self.github_scanner.download_track(&track).await?,
             RepositorySource::WebDav => {
+                let password = self.webdav_password_for(&repository);
                 let scanner = WebDavScanner::new(
                     self.database.clone(),
                     self.cache.clone(),
                     repository.username.clone(),
-                    repository.password.clone(),
+                    password,
                 );
                 scanner
                     .download_track(&track, repository.cache_enabled)
@@ -184,32 +230,33 @@ impl Cli {
         &self,
         repo_identifier: Option<&str>,
     ) -> Result<Vec<Track>, Box<dyn std::error::Error>> {
-        let tracks = if repo_identifier.is_some() {
-            self.list_tracks(repo_identifier).await?
-        } else {
-            self.database.get_favorite_tracks()?
-        };
+        if let Some(identifier) = repo_identifier {
+            // Per-repository: list tracks for that repo, then filter to favorites.
+            return Ok(self
+                .list_tracks(Some(identifier))
+                .await?
+                .into_iter()
+                .filter(|track| track.favorite && !track.blacklisted)
+                .collect());
+        }
 
-        Ok(tracks
-            .into_iter()
-            .filter(|track| track.favorite && !track.blacklisted)
-            .collect())
+        Ok(self.database.get_favorite_tracks()?)
     }
 
     pub async fn list_blacklisted_tracks(
         &self,
         repo_identifier: Option<&str>,
     ) -> Result<Vec<Track>, Box<dyn std::error::Error>> {
-        let tracks = if repo_identifier.is_some() {
-            self.list_tracks(repo_identifier).await?
-        } else {
-            self.database.get_blacklisted_tracks()?
-        };
+        if let Some(identifier) = repo_identifier {
+            return Ok(self
+                .list_tracks(Some(identifier))
+                .await?
+                .into_iter()
+                .filter(|track| track.blacklisted)
+                .collect());
+        }
 
-        Ok(tracks
-            .into_iter()
-            .filter(|track| track.blacklisted)
-            .collect())
+        Ok(self.database.get_blacklisted_tracks()?)
     }
 
     pub async fn set_track_favorite(

@@ -15,6 +15,11 @@ pub struct Repository {
     pub added_at: DateTime<Utc>,
     pub last_scanned: Option<DateTime<Utc>>,
     pub track_count: u32,
+    /// Cached ETag of the last successful GitHub Git Trees response. Sent as
+    /// `If-None-Match` on rescan so that an unchanged tree returns 304 and
+    /// avoids re-walking the repository.
+    #[serde(default)]
+    pub tree_etag: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]

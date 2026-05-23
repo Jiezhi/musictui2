@@ -9,7 +9,12 @@ use tokio::time::{sleep, Duration};
 
 use crate::cache::{CacheManager, StreamingCacheState};
 use crate::database::DatabaseManager;
+use crate::errors::GitHubError;
 use crate::models::{Repository, RepositorySource, Track};
+
+mod trees;
+#[allow(unused_imports)]
+pub use trees::{raw_download_url, tree_to_tracks, RepoMeta, TreeEntry, TreeResponse};
 
 const MAX_GITHUB_REQUEST_ATTEMPTS: u32 = 3;
 
@@ -24,6 +29,22 @@ pub struct StreamingTrackDownload {
     pub cache_path: PathBuf,
     pub state: StreamingCacheState,
     pub handle: JoinHandle<Result<PathBuf, String>>,
+}
+
+/// Outcome of a Git Trees API scan. `Unchanged` is returned when GitHub
+/// responds with 304 Not Modified to a conditional `If-None-Match` request.
+#[derive(Debug)]
+pub enum TreeScanResult {
+    Unchanged,
+    Updated {
+        tracks: Vec<Track>,
+        etag: Option<String>,
+        /// Default branch name discovered from the repo metadata. Surfaced so
+        /// future code can log or display it; not consumed yet.
+        #[allow(dead_code)]
+        branch: String,
+        truncated: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -44,7 +65,14 @@ struct GitHubApiClient {
 
 impl GitHubApiClient {
     fn new() -> Self {
-        let token = std::env::var("GITHUB_TOKEN").ok();
+        // GITHUB_TOKEN takes precedence over the keyring entry so CI runs and
+        // throwaway shells keep working without touching the OS keychain.
+        let store = crate::credentials::KeyringStore::new();
+        let token = crate::credentials::resolve_github_token(
+            std::env::var("GITHUB_TOKEN").ok(),
+            &store,
+        )
+        .unwrap_or(None);
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::USER_AGENT,
@@ -92,6 +120,7 @@ impl GitHubApiClient {
                 added_at: Utc::now(),
                 last_scanned: None,
                 track_count: 0,
+                tree_etag: None,
             })
             .collect())
     }
@@ -143,6 +172,66 @@ impl GitHubApiClient {
         }
 
         Ok(tracks)
+    }
+
+    /// Scan via the Git Trees API: at most two HTTP calls (default-branch
+    /// lookup + recursive tree) versus N calls with the Contents API.
+    ///
+    /// When the caller passes a previously-stored ETag, GitHub responds with
+    /// 304 Not Modified for an unchanged tree, allowing us to skip parsing and
+    /// database writes entirely.
+    pub async fn scan_via_trees(
+        &self,
+        owner: &str,
+        repo_name: &str,
+        if_none_match: Option<&str>,
+    ) -> Result<TreeScanResult, GitHubError> {
+        let repo_url = format!("https://api.github.com/repos/{owner}/{repo_name}");
+        let meta: RepoMeta = self
+            .send_github_json_request(&repo_url, "GitHub API error")
+            .await
+            .map_err(|err| GitHubError::Other(err.to_string()))?;
+
+        let tree_url = format!(
+            "https://api.github.com/repos/{owner}/{repo_name}/git/trees/{branch}?recursive=1",
+            branch = meta.default_branch,
+        );
+
+        let mut request = self.client.get(&tree_url);
+        if let Some(tag) = if_none_match {
+            request = request.header(reqwest::header::IF_NONE_MATCH, tag);
+        }
+
+        let response = request.send().await.map_err(GitHubError::from)?;
+        let status = response.status();
+
+        if status == StatusCode::NOT_MODIFIED {
+            return Ok(TreeScanResult::Unchanged);
+        }
+        if status == StatusCode::FORBIDDEN {
+            return Err(github_forbidden_error(response).await);
+        }
+        if !status.is_success() {
+            return Err(GitHubError::Status { status });
+        }
+
+        let etag = response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(ToString::to_string);
+
+        let tree: TreeResponse = response
+            .json()
+            .await
+            .map_err(|err| GitHubError::Decode(err.to_string()))?;
+
+        Ok(TreeScanResult::Updated {
+            tracks: tree_to_tracks(&tree.tree, owner, repo_name, &meta.default_branch, 0),
+            etag,
+            branch: meta.default_branch,
+            truncated: tree.truncated,
+        })
     }
 
     pub async fn get_file_content(&self, url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -234,7 +323,7 @@ impl GitHubApiClient {
                     let status = response.status();
 
                     if status == StatusCode::FORBIDDEN {
-                        return Err(github_forbidden_error(response).await);
+                        return Err(github_forbidden_error(response).await.into());
                     }
 
                     if status.is_success() {
@@ -271,12 +360,22 @@ impl GitHubApiClient {
     }
 }
 
-async fn github_forbidden_error(response: reqwest::Response) -> Box<dyn std::error::Error> {
+async fn github_forbidden_error(response: reqwest::Response) -> GitHubError {
+    let reset_at = response
+        .headers()
+        .get("x-ratelimit-reset")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
     let error_text = response.text().await.unwrap_or_default();
-    if error_text.contains("rate limit") {
-        "GitHub API rate limit exceeded. Set GITHUB_TOKEN to increase limit".into()
+    classify_forbidden_body(&error_text, reset_at)
+}
+
+/// Pure classifier extracted so it can be unit-tested without a real HTTP response.
+pub(crate) fn classify_forbidden_body(body: &str, reset_at: Option<u64>) -> GitHubError {
+    if body.to_lowercase().contains("rate limit") {
+        GitHubError::RateLimited { reset_at }
     } else {
-        "GitHub API access forbidden. Please check your access or set GITHUB_TOKEN".into()
+        GitHubError::Forbidden
     }
 }
 
@@ -319,6 +418,7 @@ impl GitHubScanner {
                     added_at: Utc::now(),
                     last_scanned: None,
                     track_count: 0,
+                    tree_etag: None,
                 };
 
                 self.database.save_repository(&repository)?;
@@ -326,15 +426,48 @@ impl GitHubScanner {
             }
         };
 
+        // Phase 2 fast path: the Git Trees API returns the entire repo in one
+        // shot and supports conditional requests via ETag. On 304 we return the
+        // already-persisted tracks so callers can render the library without
+        // a redundant scan.
+        match self
+            .client
+            .scan_via_trees(owner, repo_name, repository.tree_etag.as_deref())
+            .await
+        {
+            Ok(TreeScanResult::Unchanged) => {
+                return Ok(self.database.get_tracks_by_repo(repository.id)?);
+            }
+            Ok(TreeScanResult::Updated {
+                mut tracks,
+                etag,
+                truncated,
+                ..
+            }) if !truncated => {
+                for track in &mut tracks {
+                    track.repository_id = repository.id;
+                }
+                self.database.save_tracks(&tracks)?;
+                self.database
+                    .update_tree_etag(repository.id, etag.as_deref())?;
+                return Ok(tracks);
+            }
+            // Truncated tree (huge repo) → fall through to contents-API walk.
+            Ok(TreeScanResult::Updated { .. }) => {}
+            // Rate-limited / transient errors → bubble up so the caller can
+            // surface the actionable message instead of silently falling back.
+            Err(err @ GitHubError::RateLimited { .. }) => return Err(err.into()),
+            // Other tree-API errors fall back to the recursive contents walk.
+            Err(_) => {}
+        }
+
         let mut tracks = self.client.scan_repository(owner, repo_name).await?;
 
         for track in &mut tracks {
             track.repository_id = repository.id;
         }
 
-        for track in &tracks {
-            self.database.save_track(track)?;
-        }
+        self.database.save_tracks(&tracks)?;
 
         Ok(tracks)
     }
@@ -543,4 +676,45 @@ struct GitHubContent {
 
 fn is_audio_format(ext: &str) -> bool {
     matches!(ext, "mp3" | "flac" | "wav" | "ogg" | "m4a" | "aac" | "wma")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_rate_limit_body_with_reset() {
+        let body = r#"{"message":"API rate limit exceeded for user 12345."}"#;
+        match classify_forbidden_body(body, Some(1_700_000_000)) {
+            GitHubError::RateLimited { reset_at: Some(t) } => assert_eq!(t, 1_700_000_000),
+            other => panic!("expected RateLimited{{reset_at: Some}}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classifies_rate_limit_body_case_insensitive() {
+        let body = "You have exceeded a secondary RATE LIMIT.";
+        assert!(matches!(
+            classify_forbidden_body(body, None),
+            GitHubError::RateLimited { reset_at: None }
+        ));
+    }
+
+    #[test]
+    fn classifies_plain_forbidden_when_body_lacks_rate_limit() {
+        let body = r#"{"message":"Resource not accessible by integration"}"#;
+        assert!(matches!(
+            classify_forbidden_body(body, None),
+            GitHubError::Forbidden
+        ));
+    }
+
+    #[test]
+    fn retry_status_predicate_matches_5xx_and_throttling() {
+        assert!(should_retry_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(should_retry_status(StatusCode::REQUEST_TIMEOUT));
+        assert!(should_retry_status(StatusCode::BAD_GATEWAY));
+        assert!(!should_retry_status(StatusCode::NOT_FOUND));
+        assert!(!should_retry_status(StatusCode::OK));
+    }
 }

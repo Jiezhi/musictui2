@@ -1,20 +1,12 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-fn load_env_file() {
-    if let Ok(env) = std::fs::read_to_string(".env") {
-        for line in env.lines() {
-            if let Some((key, value)) = line.split_once('=') {
-                std::env::set_var(key.trim(), value.trim());
-            }
-        }
-    }
-}
-
 mod audio;
 mod cache;
 mod cli;
+mod credentials;
 mod database;
+mod errors;
 mod events;
 mod github;
 pub mod models;
@@ -117,8 +109,8 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Load .env file at startup
-    load_env_file();
+    // Load .env file at startup (silently ignored if missing).
+    let _ = dotenv::dotenv();
 
     let args = Args::parse();
 

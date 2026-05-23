@@ -121,6 +121,7 @@ impl WebDavScanner {
             added_at: Utc::now(),
             last_scanned: None,
             track_count: 0,
+            tree_etag: None,
         };
 
         self.database.save_repository(&repository)?;
@@ -178,9 +179,10 @@ impl WebDavScanner {
             }
         }
 
-        for track in &tracks {
-            self.database.save_track(track)?;
+        for track in &mut tracks {
+            track.repository_id = repository.id;
         }
+        self.database.save_tracks(&tracks)?;
 
         Ok(tracks)
     }

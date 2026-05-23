@@ -1,7 +1,9 @@
 pub mod audio;
 pub mod cache;
 pub mod cli;
+pub mod credentials;
 pub mod database;
+pub mod errors;
 pub mod events;
 pub mod github;
 pub mod models;

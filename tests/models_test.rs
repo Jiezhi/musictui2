@@ -15,6 +15,7 @@ fn test_repository_creation() {
         added_at: chrono::Utc::now(),
         last_scanned: None,
         track_count: 0,
+        tree_etag: None,
     };
 
     assert_eq!(repo.id, 1);
