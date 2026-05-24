@@ -1387,7 +1387,7 @@ dependencies = [
 
 [[package]]
 name = "musictui2"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1407,6 +1407,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "unicode-width",
 ]
 
 [[package]]

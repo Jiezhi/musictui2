@@ -65,6 +65,13 @@ impl PlaybackMode {
         }
     }
 
+    pub(crate) fn symbol(self) -> &'static str {
+        match self {
+            Self::Sequential => "→",
+            Self::Shuffle => "⇄",
+        }
+    }
+
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Sequential => "sequential",
@@ -147,14 +154,19 @@ impl PendingPlayback {
 }
 
 fn pending_status(action: &str, pending: &PendingPlayback, track_name: &str) -> String {
+    let prefix = if action.is_empty() {
+        track_name.to_string()
+    } else {
+        format!("{action} {track_name}")
+    };
     if let Some(percent) = pending.cache_percent() {
-        format!("{action} {track_name} | Caching {percent}%")
+        format!("{prefix} | Caching {percent}%")
     } else {
         let downloaded_mb = pending
             .cache_progress()
             .map(|(downloaded_bytes, _)| downloaded_bytes / 1024 / 1024)
             .unwrap_or_default();
-        format!("{action} {track_name} | Caching {downloaded_mb}MB")
+        format!("{prefix} | Caching {downloaded_mb}MB")
     }
 }
 
@@ -183,6 +195,8 @@ pub struct App {
     credential_store: Arc<dyn CredentialStore>,
     pending_playback: Option<PendingPlayback>,
     status_message: String,
+    marquee_offset: usize,
+    marquee_last_status: String,
     track_search_query: String,
     is_searching_tracks: bool,
     show_help: bool,
@@ -233,7 +247,9 @@ impl App {
             cache,
             credential_store,
             pending_playback: None,
-            status_message: "Ready".to_string(),
+            status_message: String::new(),
+            marquee_offset: 0,
+            marquee_last_status: String::new(),
             track_search_query: String::new(),
             is_searching_tracks: false,
             show_help: false,
@@ -293,6 +309,7 @@ impl App {
                 playback_mode: self.playback_mode,
                 volume: self.audio_player.get_volume(),
                 status_message: &self.status_message,
+                marquee_offset: self.marquee_offset,
                 track_search_query: &self.track_search_query,
                 is_searching_tracks: self.is_searching_tracks,
                 show_help: self.show_help,
@@ -546,7 +563,11 @@ impl App {
                     self.status_message = "Paused".to_string();
                 } else if self.audio_player.is_paused() {
                     self.audio_player.play()?;
-                    self.status_message = "Playing".to_string();
+                    self.status_message = self
+                        .audio_player
+                        .get_current_track()
+                        .map(|t| t.name.clone())
+                        .unwrap_or_default();
                 } else if self.selected_tab_can_play_tracks() {
                     if let Some(index) = self.current_track_index {
                         self.queue_track(index)?;
@@ -642,7 +663,7 @@ impl App {
                     pending.cancel();
                 }
                 self.audio_player.load_local_track(track.clone())?;
-                self.status_message = format!("Playing {}", track.name);
+                self.status_message = track.name.clone();
                 return Ok(());
             }
 
@@ -709,8 +730,15 @@ impl App {
             }
         } else if self.audio_player.is_playing() {
             if let Some(track) = self.audio_player.get_current_track() {
-                self.status_message = format!("Playing {}", track.name);
+                self.status_message = track.name.clone();
             }
+        }
+
+        if self.status_message != self.marquee_last_status {
+            self.marquee_offset = 0;
+            self.marquee_last_status = self.status_message.clone();
+        } else {
+            self.marquee_offset = self.marquee_offset.wrapping_add(1);
         }
 
         Ok(())
@@ -745,7 +773,7 @@ impl App {
                                         },
                                     };
                                     self.status_message = pending_status(
-                                        "Playing",
+                                        "",
                                         &pending,
                                         pending.track.name.as_str(),
                                     );
@@ -800,7 +828,7 @@ impl App {
                             }
 
                             if self.audio_player.is_playing() {
-                                self.status_message = format!("Playing {} | Cached", track.name);
+                                self.status_message = format!("{} | Cached", track.name);
                             } else {
                                 self.status_message = format!("Cached {}", track.name);
                             }
@@ -824,7 +852,7 @@ impl App {
                         },
                     };
                     self.status_message =
-                        pending_status("Playing", &pending, pending.track.name.as_str());
+                        pending_status("", &pending, pending.track.name.as_str());
                     self.pending_playback = Some(pending);
                 }
             }

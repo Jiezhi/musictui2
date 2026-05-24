@@ -15,8 +15,8 @@ use ratatui::Frame;
 use crate::models::{PlaybackState, Repository, Track};
 
 use super::util::{
-    playback_state_label, track_page_step_for_area, volume_percent, TrackListFilter, TAB_BLACKLIST,
-    TAB_FAVORITES, TAB_TRACKS,
+    display_width, marquee_view, playback_state_symbol, track_page_step_for_area, volume_percent,
+    TrackListFilter, TAB_BLACKLIST, TAB_FAVORITES, TAB_TRACKS,
 };
 use super::PlaybackMode;
 
@@ -34,6 +34,7 @@ pub(super) struct DrawData<'a> {
     pub(super) playback_mode: PlaybackMode,
     pub(super) volume: f32,
     pub(super) status_message: &'a str,
+    pub(super) marquee_offset: usize,
     pub(super) track_search_query: &'a str,
     pub(super) is_searching_tracks: bool,
     pub(super) show_help: bool,
@@ -150,7 +151,8 @@ fn render_main_content(
 }
 
 fn render_footer(f: &mut Frame<'_>, area: Rect, data: &DrawData<'_>) {
-    let footer = Paragraph::new(footer_text(data)).style(Style::default().fg(Color::Gray));
+    let footer =
+        Paragraph::new(footer_text(data, area.width as usize)).style(Style::default().fg(Color::Gray));
     f.render_widget(footer, area);
 }
 
@@ -211,23 +213,35 @@ fn tracks_table(data: &DrawData<'_>) -> Table<'static> {
     .highlight_style(Style::default().fg(Color::Yellow))
 }
 
-fn footer_text(data: &DrawData<'_>) -> String {
-    let search_status = if data.is_searching_tracks {
-        format!(" | Search: /{}_", data.track_search_query)
+fn footer_text(data: &DrawData<'_>, max_width: usize) -> String {
+    let search_part = if data.is_searching_tracks {
+        format!(" │ /{}_", data.track_search_query)
     } else if data.track_search_query.is_empty() {
         String::new()
     } else {
-        format!(" | Search: {}", data.track_search_query)
+        format!(" │ /{}", data.track_search_query)
     };
 
-    format!(
-        "{} | Playback: {} | Mode: {} | Vol: {}%{} | ?: Shortcuts",
-        data.status_message,
-        playback_state_label(data.playback_state),
-        data.playback_mode.label(),
+    let suffix = format!(
+        " │ {} │ {} │ {}% │ ?{}",
+        playback_state_symbol(data.playback_state),
+        data.playback_mode.symbol(),
         volume_percent(data.volume),
-        search_status
-    )
+        search_part,
+    );
+    let suffix_width = display_width(&suffix);
+    let status_budget = max_width.saturating_sub(suffix_width);
+
+    if status_budget == 0 || data.status_message.is_empty() {
+        return if data.status_message.is_empty() {
+            suffix.trim_start_matches(" │ ").to_string()
+        } else {
+            data.status_message.to_string()
+        };
+    }
+
+    let displayed = marquee_view(data.status_message, data.marquee_offset, status_budget);
+    format!("{}  {}", displayed, suffix.trim_start_matches(" │ "))
 }
 
 fn help_text() -> &'static str {

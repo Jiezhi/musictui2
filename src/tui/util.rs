@@ -217,16 +217,57 @@ pub(super) fn shuffle_autoplay_index(
     Some(index)
 }
 
-pub(super) fn playback_state_label(playback_state: &PlaybackState) -> &'static str {
+pub(super) fn playback_state_symbol(playback_state: &PlaybackState) -> &'static str {
     match playback_state {
-        PlaybackState::Playing => "Playing",
-        PlaybackState::Paused => "Paused",
-        PlaybackState::Stopped => "Stopped",
+        PlaybackState::Playing => "▶",
+        PlaybackState::Paused => "⏸",
+        PlaybackState::Stopped => "⏹",
     }
 }
 
 pub(super) fn volume_percent(volume: f32) -> u8 {
     (volume.clamp(0.0, 1.0) * 100.0).round() as u8
+}
+
+pub(super) const MARQUEE_GAP: &str = "   ";
+
+pub(super) fn display_width(text: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(text)
+}
+
+/// Returns a window of `text` whose display width fits within `max_width`.
+/// If the full text fits, returns it unchanged; otherwise scrolls based on
+/// `offset` (advanced once per tick by the caller).
+pub(super) fn marquee_view(text: &str, offset: usize, max_width: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+
+    if max_width == 0 {
+        return String::new();
+    }
+    let total: usize = text.chars().filter_map(|c| c.width()).sum();
+    if total <= max_width {
+        return text.to_string();
+    }
+
+    let chars: Vec<char> = text.chars().chain(MARQUEE_GAP.chars()).collect();
+    let cycle = chars.len();
+    let start = offset % cycle;
+
+    let mut out = String::new();
+    let mut width = 0usize;
+    let mut consumed = 0usize;
+    while consumed < cycle && width < max_width {
+        let c = chars[(start + consumed) % cycle];
+        let cw = c.width().unwrap_or(0);
+        if width + cw > max_width {
+            out.push(' ');
+            break;
+        }
+        out.push(c);
+        width += cw;
+        consumed += 1;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -375,5 +416,37 @@ mod tests {
             filtered_track_indices(&tracks, "", TrackListFilter::Blacklist),
             vec![1]
         );
+    }
+
+    #[test]
+    fn marquee_returns_text_unchanged_when_fits() {
+        assert_eq!(marquee_view("hello", 0, 10), "hello");
+        assert_eq!(marquee_view("hello", 5, 10), "hello");
+    }
+
+    #[test]
+    fn marquee_scrolls_long_text_and_wraps() {
+        let text = "AbCdEfGhIj";
+        let first = marquee_view(text, 0, 5);
+        assert_eq!(display_width(&first), 5);
+        assert_eq!(first, "AbCdE");
+
+        let second = marquee_view(text, 1, 5);
+        assert_eq!(display_width(&second), 5);
+        assert_eq!(second, "bCdEf");
+
+        let wrap = marquee_view(text, text.chars().count() + MARQUEE_GAP.len(), 5);
+        assert_eq!(wrap, "AbCdE");
+    }
+
+    #[test]
+    fn marquee_handles_wide_chars_without_splitting() {
+        let view = marquee_view("中文歌曲名称展示", 0, 5);
+        assert!(display_width(&view) <= 5);
+    }
+
+    #[test]
+    fn marquee_returns_empty_when_no_budget() {
+        assert_eq!(marquee_view("anything", 0, 0), "");
     }
 }
