@@ -64,7 +64,28 @@ impl PlaybackMode {
             Self::Shuffle => "Shuffle",
         }
     }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Sequential => "sequential",
+            Self::Shuffle => "shuffle",
+        }
+    }
 }
+
+impl std::str::FromStr for PlaybackMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "sequential" => Ok(Self::Sequential),
+            "shuffle" => Ok(Self::Shuffle),
+            other => Err(format!("unknown playback mode: {other}")),
+        }
+    }
+}
+
+const PLAYBACK_MODE_SETTING_KEY: &str = "playback_mode";
 
 struct PendingPlayback {
     track_index: usize,
@@ -183,6 +204,13 @@ impl App {
             .map(|duration| duration.as_nanos() as u64)
             .unwrap_or(0x05ee_d5ee_dd15_ca11_u64);
 
+        let playback_mode = database
+            .get_setting(PLAYBACK_MODE_SETTING_KEY)
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<PlaybackMode>().ok())
+            .unwrap_or(PlaybackMode::Sequential);
+
         Ok(Self {
             terminal,
             selected_tab: 0,
@@ -196,7 +224,7 @@ impl App {
             current_repository_index: None,
             current_track_index: None,
             current_track_row_index: None,
-            playback_mode: PlaybackMode::Sequential,
+            playback_mode,
             shuffle_seed,
             pending_repository_delete: None,
             event_bus,
@@ -263,7 +291,6 @@ impl App {
                     .map(|pending| pending.track_index),
                 playback_state: self.audio_player.get_playback_state(),
                 playback_mode: self.playback_mode,
-                current_track: self.audio_player.get_current_track(),
                 volume: self.audio_player.get_volume(),
                 status_message: &self.status_message,
                 track_search_query: &self.track_search_query,
@@ -466,7 +493,17 @@ impl App {
             }
             KeyCode::Char('m') if self.selected_tab_is_track_list() => {
                 self.playback_mode = self.playback_mode.next();
-                self.status_message = format!("Playback mode: {}", self.playback_mode.label());
+                if let Err(err) = self
+                    .database
+                    .set_setting(PLAYBACK_MODE_SETTING_KEY, self.playback_mode.as_str())
+                {
+                    self.status_message = format!(
+                        "Playback mode: {} (save failed: {err})",
+                        self.playback_mode.label()
+                    );
+                } else {
+                    self.status_message = format!("Playback mode: {}", self.playback_mode.label());
+                }
                 self.pending_repository_delete = None;
             }
             KeyCode::Char('.')
@@ -1115,4 +1152,78 @@ pub async fn run(event_bus: EventBus) -> Result<(), Box<dyn std::error::Error>> 
     let credential_store: Arc<dyn CredentialStore> = Arc::new(KeyringStore::new());
     let mut app = App::new(event_bus, database, github_scanner, cache, credential_store)?;
     app.run().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn playback_mode_round_trips_through_str() {
+        for mode in [PlaybackMode::Sequential, PlaybackMode::Shuffle] {
+            let parsed: PlaybackMode = mode.as_str().parse().expect("parse known label");
+            assert_eq!(parsed, mode);
+        }
+    }
+
+    #[test]
+    fn playback_mode_rejects_unknown_value() {
+        assert!("random".parse::<PlaybackMode>().is_err());
+        assert!("".parse::<PlaybackMode>().is_err());
+    }
+
+    #[test]
+    fn playback_mode_toggle_alternates() {
+        assert_eq!(PlaybackMode::Sequential.next(), PlaybackMode::Shuffle);
+        assert_eq!(PlaybackMode::Shuffle.next(), PlaybackMode::Sequential);
+    }
+
+    #[tokio::test]
+    async fn playback_mode_is_loaded_from_database_on_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("music.db");
+        {
+            let db = DatabaseManager::from_path(&db_path).unwrap();
+            db.set_setting(PLAYBACK_MODE_SETTING_KEY, PlaybackMode::Shuffle.as_str())
+                .unwrap();
+        }
+
+        let database = Arc::new(DatabaseManager::from_path(&db_path).unwrap());
+        let cache = Arc::new(crate::cache::CacheManager::new());
+        let github_scanner = Arc::new(GitHubScanner::new(database.clone(), cache.clone()));
+        let credential_store: Arc<dyn CredentialStore> =
+            Arc::new(crate::credentials::KeyringStore::new());
+
+        let app = App::new(
+            EventBus::new(),
+            database,
+            github_scanner,
+            cache,
+            credential_store,
+        )
+        .expect("app constructs");
+
+        assert_eq!(app.playback_mode, PlaybackMode::Shuffle);
+    }
+
+    #[tokio::test]
+    async fn playback_mode_defaults_to_sequential_when_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = Arc::new(DatabaseManager::from_path(dir.path().join("music.db")).unwrap());
+        let cache = Arc::new(crate::cache::CacheManager::new());
+        let github_scanner = Arc::new(GitHubScanner::new(database.clone(), cache.clone()));
+        let credential_store: Arc<dyn CredentialStore> =
+            Arc::new(crate::credentials::KeyringStore::new());
+
+        let app = App::new(
+            EventBus::new(),
+            database,
+            github_scanner,
+            cache,
+            credential_store,
+        )
+        .expect("app constructs");
+
+        assert_eq!(app.playback_mode, PlaybackMode::Sequential);
+    }
 }

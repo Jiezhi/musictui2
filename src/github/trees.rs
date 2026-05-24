@@ -90,9 +90,7 @@ pub fn raw_download_url(owner: &str, repo_name: &str, branch_ref: &str, path: &s
         .map(percent_encode_segment)
         .collect::<Vec<_>>()
         .join("/");
-    format!(
-        "https://raw.githubusercontent.com/{owner}/{repo_name}/{branch_ref}/{encoded_path}"
-    )
+    format!("https://raw.githubusercontent.com/{owner}/{repo_name}/{branch_ref}/{encoded_path}")
 }
 
 fn percent_encode_segment(segment: &str) -> String {

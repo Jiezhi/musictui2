@@ -118,6 +118,14 @@ impl DatabaseManager {
             [],
         )?;
 
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )",
+            [],
+        )?;
+
         let db = Self {
             connection: Arc::new(Mutex::new(connection)),
         };
@@ -278,9 +286,7 @@ impl DatabaseManager {
 
     pub fn get_repositories(&self) -> Result<Vec<Repository>> {
         let conn = self.connection.lock().unwrap();
-        let sql = format!(
-            "SELECT {REPOSITORY_COLUMNS} FROM repositories ORDER BY added_at DESC"
-        );
+        let sql = format!("SELECT {REPOSITORY_COLUMNS} FROM repositories ORDER BY added_at DESC");
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([], row_to_repository)?;
         rows.collect()
@@ -369,9 +375,8 @@ impl DatabaseManager {
 
     pub fn get_tracks_by_repo(&self, repository_id: i64) -> Result<Vec<Track>> {
         let conn = self.connection.lock().unwrap();
-        let sql = format!(
-            "SELECT {TRACK_COLUMNS} FROM tracks WHERE repository_id = ?1 ORDER BY name"
-        );
+        let sql =
+            format!("SELECT {TRACK_COLUMNS} FROM tracks WHERE repository_id = ?1 ORDER BY name");
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params![repository_id], row_to_track)?;
         rows.collect()
@@ -428,17 +433,14 @@ impl DatabaseManager {
 
     pub fn get_repository_by_name(&self, owner: &str, name: &str) -> Result<Repository> {
         let conn = self.connection.lock().unwrap();
-        let sql = format!(
-            "SELECT {REPOSITORY_COLUMNS} FROM repositories WHERE owner = ?1 AND name = ?2"
-        );
+        let sql =
+            format!("SELECT {REPOSITORY_COLUMNS} FROM repositories WHERE owner = ?1 AND name = ?2");
         conn.query_row(&sql, params![owner, name], row_to_repository)
     }
 
     pub fn get_repository_by_id(&self, repository_id: i64) -> Result<Repository> {
         let conn = self.connection.lock().unwrap();
-        let sql = format!(
-            "SELECT {REPOSITORY_COLUMNS} FROM repositories WHERE id = ?1"
-        );
+        let sql = format!("SELECT {REPOSITORY_COLUMNS} FROM repositories WHERE id = ?1");
         conn.query_row(&sql, params![repository_id], row_to_repository)
     }
 
@@ -479,6 +481,27 @@ impl DatabaseManager {
         Ok(())
     }
 
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.connection.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
+        let mut rows = stmt.query(params![key])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get(0)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.connection.lock().unwrap();
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+
+        Ok(())
+    }
+
     pub fn get_favorite_tracks(&self) -> Result<Vec<Track>> {
         let conn = self.connection.lock().unwrap();
         let sql = format!(
@@ -491,9 +514,7 @@ impl DatabaseManager {
 
     pub fn get_blacklisted_tracks(&self) -> Result<Vec<Track>> {
         let conn = self.connection.lock().unwrap();
-        let sql = format!(
-            "SELECT {TRACK_COLUMNS} FROM tracks WHERE blacklisted = 1 ORDER BY name"
-        );
+        let sql = format!("SELECT {TRACK_COLUMNS} FROM tracks WHERE blacklisted = 1 ORDER BY name");
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([], row_to_track)?;
         rows.collect()
@@ -838,10 +859,7 @@ mod tests {
         // First track has a valid repo, second references a nonexistent repo.
         // With foreign_keys = ON, the second insert must fail and the entire
         // batch must roll back so the first track is not persisted either.
-        let tracks = vec![
-            test_track(repo.id, "ok.mp3"),
-            test_track(9999, "bad.mp3"),
-        ];
+        let tracks = vec![test_track(repo.id, "ok.mp3"), test_track(9999, "bad.mp3")];
 
         let result = db.save_tracks(&tracks);
         assert!(result.is_err(), "expected FK violation");
@@ -861,11 +879,8 @@ mod tests {
 
         db.save_repository(&test_repository()).unwrap();
         let repo = db.get_repository_by_name("owner", "repo").unwrap();
-        db.save_tracks(&[
-            test_track(repo.id, "a.mp3"),
-            test_track(repo.id, "b.mp3"),
-        ])
-        .unwrap();
+        db.save_tracks(&[test_track(repo.id, "a.mp3"), test_track(repo.id, "b.mp3")])
+            .unwrap();
 
         db.delete_repository(repo.id).unwrap();
 
@@ -948,7 +963,8 @@ mod tests {
         let stored = db.get_repository_by_name("owner", "repo").unwrap();
         assert_eq!(stored.tree_etag.as_deref(), Some("W/\"abc123\""));
 
-        db.update_tree_etag(stored.id, Some("W/\"def456\"")).unwrap();
+        db.update_tree_etag(stored.id, Some("W/\"def456\""))
+            .unwrap();
         let refreshed = db.get_repository_by_name("owner", "repo").unwrap();
         assert_eq!(refreshed.tree_etag.as_deref(), Some("W/\"def456\""));
 
@@ -1019,5 +1035,96 @@ mod tests {
             .unwrap();
         let after = db.get_repository_by_name("owner", "repo").unwrap();
         assert_eq!(after.tree_etag.as_deref(), Some("\"etag-after-migration\""));
+    }
+
+    #[test]
+    fn setting_round_trips_and_upserts() {
+        let dir = tempdir().unwrap();
+        let db = DatabaseManager::from_path(dir.path().join("music.db")).unwrap();
+
+        assert_eq!(db.get_setting("playback_mode").unwrap(), None);
+
+        db.set_setting("playback_mode", "shuffle").unwrap();
+        assert_eq!(
+            db.get_setting("playback_mode").unwrap().as_deref(),
+            Some("shuffle")
+        );
+
+        // Setting the same key again overwrites.
+        db.set_setting("playback_mode", "sequential").unwrap();
+        assert_eq!(
+            db.get_setting("playback_mode").unwrap().as_deref(),
+            Some("sequential")
+        );
+
+        // Distinct keys do not collide.
+        db.set_setting("other", "value").unwrap();
+        assert_eq!(
+            db.get_setting("playback_mode").unwrap().as_deref(),
+            Some("sequential")
+        );
+        assert_eq!(db.get_setting("other").unwrap().as_deref(), Some("value"));
+    }
+
+    #[test]
+    fn settings_persist_across_reopens() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("music.db");
+        {
+            let db = DatabaseManager::from_path(&db_path).unwrap();
+            db.set_setting("playback_mode", "shuffle").unwrap();
+        }
+
+        let reopened = DatabaseManager::from_path(&db_path).unwrap();
+        assert_eq!(
+            reopened.get_setting("playback_mode").unwrap().as_deref(),
+            Some("shuffle")
+        );
+    }
+
+    #[test]
+    fn legacy_database_without_settings_table_gets_migrated() {
+        // Simulate a database opened before the settings table existed.
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("music.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute(
+                "CREATE TABLE repositories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    url TEXT NOT NULL UNIQUE,
+                    added_at DATETIME NOT NULL,
+                    last_scanned DATETIME
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE TABLE tracks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repository_id INTEGER NOT NULL,
+                    path TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    format TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    duration INTEGER,
+                    url TEXT NOT NULL,
+                    local_path TEXT,
+                    downloaded BOOLEAN DEFAULT FALSE
+                )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = DatabaseManager::from_path(&db_path).unwrap();
+        assert_eq!(db.get_setting("playback_mode").unwrap(), None);
+        db.set_setting("playback_mode", "shuffle").unwrap();
+        assert_eq!(
+            db.get_setting("playback_mode").unwrap().as_deref(),
+            Some("shuffle")
+        );
     }
 }

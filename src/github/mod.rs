@@ -68,11 +68,9 @@ impl GitHubApiClient {
         // GITHUB_TOKEN takes precedence over the keyring entry so CI runs and
         // throwaway shells keep working without touching the OS keychain.
         let store = crate::credentials::KeyringStore::new();
-        let token = crate::credentials::resolve_github_token(
-            std::env::var("GITHUB_TOKEN").ok(),
-            &store,
-        )
-        .unwrap_or(None);
+        let token =
+            crate::credentials::resolve_github_token(std::env::var("GITHUB_TOKEN").ok(), &store)
+                .unwrap_or(None);
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::USER_AGENT,

@@ -16,7 +16,7 @@ use crate::models::{PlaybackState, Repository, Track};
 
 use super::util::{
     playback_state_label, track_page_step_for_area, volume_percent, TrackListFilter, TAB_BLACKLIST,
-    TAB_FAVORITES, TAB_NOW_PLAYING, TAB_TRACKS,
+    TAB_FAVORITES, TAB_TRACKS,
 };
 use super::PlaybackMode;
 
@@ -32,7 +32,6 @@ pub(super) struct DrawData<'a> {
     pub(super) caching_track_index: Option<usize>,
     pub(super) playback_state: &'a PlaybackState,
     pub(super) playback_mode: PlaybackMode,
-    pub(super) current_track: Option<&'a Track>,
     pub(super) volume: f32,
     pub(super) status_message: &'a str,
     pub(super) track_search_query: &'a str,
@@ -112,13 +111,7 @@ fn render_header(f: &mut Frame<'_>, area: Rect, data: &DrawData<'_>) {
 }
 
 fn render_tabs(f: &mut Frame<'_>, area: Rect, data: &DrawData<'_>) {
-    let titles = [
-        "Repositories",
-        "Tracks",
-        "Favorites",
-        "Blacklist",
-        "Now Playing",
-    ];
+    let titles = ["Repositories", "Tracks", "Favorites", "Blacklist"];
     let tabs_widget = Tabs::new(titles.iter().copied())
         .block(Block::default().borders(Borders::NONE))
         .select(data.selected_tab)
@@ -151,18 +144,6 @@ fn render_main_content(
         TAB_TRACKS | TAB_FAVORITES | TAB_BLACKLIST => {
             tracks_table_state.select(data.current_track_row_index);
             f.render_stateful_widget(tracks_table(data), area, tracks_table_state);
-        }
-        TAB_NOW_PLAYING => {
-            let status = playback_state_label(data.playback_state);
-            let content = if let Some(track) = data.current_track {
-                format!("{}\n{}\nStatus: {}", track.name, track.path, status)
-            } else {
-                "No track playing".to_string()
-            };
-            let paragraph = Paragraph::new(content)
-                .block(Block::default().title("Now Playing").borders(Borders::ALL))
-                .wrap(ratatui::widgets::Wrap { trim: true });
-            f.render_widget(paragraph, area);
         }
         _ => {}
     }

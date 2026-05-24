@@ -219,8 +219,7 @@ mod tests {
         let store = InMemoryStore::new();
         store.set(GITHUB_TOKEN_KEY, "from-keyring").unwrap();
 
-        let resolved =
-            resolve_github_token(Some("from-env".to_string()), &store).unwrap();
+        let resolved = resolve_github_token(Some("from-env".to_string()), &store).unwrap();
         assert_eq!(resolved.as_deref(), Some("from-env"));
     }
 
@@ -267,8 +266,12 @@ mod tests {
     #[test]
     fn resolve_webdav_password_returns_none_when_no_source_has_value() {
         let store = InMemoryStore::new();
-        assert!(resolve_webdav_password("nas", None, &store).unwrap().is_none());
-        assert!(resolve_webdav_password("nas", Some(""), &store).unwrap().is_none());
+        assert!(resolve_webdav_password("nas", None, &store)
+            .unwrap()
+            .is_none());
+        assert!(resolve_webdav_password("nas", Some(""), &store)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -285,11 +288,15 @@ mod tests {
         store_webdav_password("home", "h-secret", &store).unwrap();
         store_webdav_password("work", "w-secret", &store).unwrap();
         assert_eq!(
-            resolve_webdav_password("home", None, &store).unwrap().as_deref(),
+            resolve_webdav_password("home", None, &store)
+                .unwrap()
+                .as_deref(),
             Some("h-secret")
         );
         assert_eq!(
-            resolve_webdav_password("work", None, &store).unwrap().as_deref(),
+            resolve_webdav_password("work", None, &store)
+                .unwrap()
+                .as_deref(),
             Some("w-secret")
         );
     }

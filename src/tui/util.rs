@@ -16,8 +16,7 @@ pub(super) const TAB_REPOSITORIES: usize = 0;
 pub(super) const TAB_TRACKS: usize = 1;
 pub(super) const TAB_FAVORITES: usize = 2;
 pub(super) const TAB_BLACKLIST: usize = 3;
-pub(super) const TAB_NOW_PLAYING: usize = 4;
-pub(super) const TAB_COUNT: usize = 5;
+pub(super) const TAB_COUNT: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TrackListFilter {
@@ -250,6 +249,23 @@ mod tests {
             favorite: false,
             blacklisted: false,
         }
+    }
+
+    #[test]
+    fn tab_count_matches_track_list_tabs_plus_repositories() {
+        // 4 tabs in total: Repositories, Tracks, Favorites, Blacklist.
+        assert_eq!(TAB_COUNT, 4);
+        // Every numeric tab below TAB_COUNT is either repositories or a
+        // resolvable track list filter — no holes.
+        assert!(track_list_filter_for_tab(TAB_REPOSITORIES).is_none());
+        for tab in 1..TAB_COUNT {
+            assert!(
+                track_list_filter_for_tab(tab).is_some(),
+                "tab {tab} should map to a track list filter"
+            );
+        }
+        // Anything past the last index has no mapping.
+        assert!(track_list_filter_for_tab(TAB_COUNT).is_none());
     }
 
     #[test]
