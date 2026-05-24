@@ -26,6 +26,23 @@ The repo defines auxiliary binaries under `src/bin/` (`debug_audio`, `test_audio
 
 `GITHUB_TOKEN` is read from the environment or from a `.env` file loaded at startup (`main.rs::load_env_file`). The loader is a minimal `KEY=VALUE` line parser — no quoting, no comments. Without a token, GitHub API access is capped at 60 req/hour.
 
+## Git Push & Release
+
+When `git push` fails with HTTP2 framing errors (common on some networks), retry directly — it often succeeds on the second or third attempt. If it keeps failing, use `gh` to check auth (`gh auth status`) and retry.
+
+Release workflow: the CI pipeline (`release.yml`) triggers on `v*` tag pushes. To cut a release:
+
+```bash
+# Bump version in Cargo.toml, then:
+git add Cargo.toml Cargo.lock [other files]
+git commit -m "feat: <summary>"
+git push origin main
+git tag -a v0.X.Y -m "v0.X.Y: <summary>"
+git push origin v0.X.Y
+```
+
+CI builds for all 4 platforms (linux-x86_64, macos-aarch64, macos-x86_64, windows-x86_64) and publishes to the GitHub Releases page. Check status with `gh run list --workflow=release.yml --limit 3`.
+
 ## Data Storage
 
 Database and cache live under the platform config dir under `musictui2/`:
@@ -49,7 +66,7 @@ The app is a CLI-first Rust application; the TUI is one of the subcommands. Toki
 - `cache/` — SHA256-keyed file cache; supports concurrent "caching while playing" (a partial file may exist while a download is in-flight).
 - `audio/` — `rodio`-based playback; can play from a fully-cached file or stream while the cache writer runs.
 - `events/` — `EventBus` built on `std::sync::mpsc`. Currently mostly unused (`_event_bus` in `Cli`), but the event enum is the contract for future cross-module signaling.
-- `tui/` — single large `App` struct in `tui/mod.rs::App` (~1800 lines, three tabs: Repositories / Tracks / Now Playing). Owns its own copies of the managers; `tui::run(event_bus)` is the entrypoint.
+- `tui/` — single large `App` struct in `tui/mod.rs::App` (four tabs: Repositories / Tracks / Favorites / Blacklist). Owns its own copies of the managers; `tui::run(event_bus)` is the entrypoint.
 
 **Source abstraction**: `RepositorySource` is the dispatch point. When adding a new source backend, you need: (1) a new variant on the enum + `as_str`/`FromStr`, (2) a scanner with `add_source` / `scan_repository` / `download_track`, (3) dispatch arms in `cli/mod.rs::scan_repository` and `download_track`. The database schema already carries `username`/`password`/`cache_enabled` for source-specific config.
 
