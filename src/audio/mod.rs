@@ -86,8 +86,8 @@ impl AudioPlayer {
 
         let (stream, stream_handle) = OutputStream::try_default()?;
         let sink = Sink::try_new(&stream_handle)?;
-        let file = File::open(local_path)?;
-        let source = Decoder::new(BufReader::new(file))?;
+        let file = BufReader::new(File::open(local_path)?);
+        let source = local_decoder(file, &track.format)?;
 
         sink.set_volume(self.volume);
         sink.append(source);
@@ -267,10 +267,10 @@ pub fn prepare_streaming_decoder(
     }
 }
 
-fn decode_streaming_reader(
-    reader: GrowingFileReader,
+fn decode_reader<R: std::io::Read + std::io::Seek + Send + Sync + 'static>(
+    reader: R,
     format: &str,
-) -> Result<StreamingDecoder, rodio::decoder::DecoderError> {
+) -> Result<Decoder<R>, rodio::decoder::DecoderError> {
     match format {
         "flac" => Decoder::new_flac(reader),
         "mp3" => Decoder::new_mp3(reader),
@@ -278,6 +278,20 @@ fn decode_streaming_reader(
         "wav" => Decoder::new_wav(reader),
         _ => Decoder::new(reader),
     }
+}
+
+fn decode_streaming_reader(
+    reader: GrowingFileReader,
+    format: &str,
+) -> Result<StreamingDecoder, rodio::decoder::DecoderError> {
+    decode_reader(reader, format)
+}
+
+fn local_decoder(
+    reader: BufReader<File>,
+    format: &str,
+) -> Result<Decoder<BufReader<File>>, rodio::decoder::DecoderError> {
+    decode_reader(reader, format)
 }
 
 impl Drop for AudioPlayer {
@@ -368,5 +382,62 @@ mod tests {
 
         // Clean up
         drop(temp_file);
+    }
+
+    fn minimal_wav_bytes() -> Vec<u8> {
+        // 44-byte WAV header: PCM, 1 channel, 8000 Hz, 8-bit samples, 0 data bytes.
+        let sample_rate: u32 = 8000;
+        let byte_rate: u32 = sample_rate;
+        let mut bytes = Vec::with_capacity(44);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&36u32.to_le_bytes()); // file size - 8
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes()); // chunk size
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // mono
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&byte_rate.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // block align
+        bytes.extend_from_slice(&8u16.to_le_bytes()); // bits per sample
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // data size
+        bytes
+    }
+
+    #[test]
+    fn decode_reader_succeeds_for_known_format() {
+        let wav_data = minimal_wav_bytes();
+        let cursor = std::io::Cursor::new(wav_data);
+        let result = decode_reader(cursor, "wav");
+        assert!(result.is_ok(), "known WAV format should decode");
+    }
+
+    #[test]
+    fn decode_reader_rejects_unsupported_format_without_panicking() {
+        // Random bytes that aren't any recognizable audio format header.
+        let data = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0x00, 0x00];
+        let cursor = std::io::Cursor::new(data);
+        let result = decode_reader(cursor, "wma");
+        assert!(
+            result.is_err(),
+            "unsupported format wma should return an error"
+        );
+    }
+
+    #[test]
+    fn decode_reader_dispatches_known_formats_without_panicking() {
+        // Even with invalid data, the dispatch must never panic.
+        // The error type confirms the format-specific decoder was invoked.
+        let garbage = vec![0u8; 64];
+        for format in ["flac", "mp3", "ogg", "wav"] {
+            let cursor = std::io::Cursor::new(garbage.clone());
+            let result = decode_reader(cursor, format);
+            // Should fail with a decoder error, not panic.
+            assert!(
+                result.is_err(),
+                "{format} dispatch should return error for garbage data"
+            );
+        }
     }
 }

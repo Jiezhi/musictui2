@@ -704,7 +704,9 @@ impl App {
         }
 
         if self.audio_player.has_finished() {
-            self.handle_track_finished()?;
+            if let Err(err) = self.handle_track_finished() {
+                self.status_message = format!("Autoplay error: {err}");
+            }
         } else if self.audio_player.is_playing() {
             if let Some(track) = self.audio_player.get_current_track() {
                 self.status_message = format!("Playing {}", track.name);
@@ -728,20 +730,33 @@ impl App {
                     match decoder_handle.await {
                         Ok(Ok(decoder)) => {
                             let track = pending.track.clone();
-                            self.audio_player
-                                .load_streaming_track(track.clone(), decoder)?;
-                            self.select_track_index(Some(pending.track_index));
-                            let pending = PendingPlayback {
-                                track_index: pending.track_index,
-                                track,
-                                state: PendingPlaybackState::Caching {
-                                    cache_state,
-                                    download_handle,
-                                },
-                            };
-                            self.status_message =
-                                pending_status("Playing", &pending, pending.track.name.as_str());
-                            self.pending_playback = Some(pending);
+                            match self
+                                .audio_player
+                                .load_streaming_track(track.clone(), decoder)
+                            {
+                                Ok(()) => {
+                                    self.select_track_index(Some(pending.track_index));
+                                    let pending = PendingPlayback {
+                                        track_index: pending.track_index,
+                                        track,
+                                        state: PendingPlaybackState::Caching {
+                                            cache_state,
+                                            download_handle,
+                                        },
+                                    };
+                                    self.status_message = pending_status(
+                                        "Playing",
+                                        &pending,
+                                        pending.track.name.as_str(),
+                                    );
+                                    self.pending_playback = Some(pending);
+                                }
+                                Err(err) => {
+                                    cache_state.mark_error(err.to_string());
+                                    download_handle.abort();
+                                    self.status_message = format!("Playback failed: {err}");
+                                }
+                            }
                         }
                         Ok(Err(err)) => {
                             cache_state.mark_error(err.clone());
@@ -1014,12 +1029,28 @@ impl App {
 
         self.audio_player.stop()?;
 
-        if let Some(index) = self.next_playback_index_from(finished_index, false) {
-            self.queue_track(index)?;
-        } else {
-            self.status_message = format!("{finished_track_name} finished");
+        let max_skips = self.active_playback_indices().len().max(1);
+        let mut candidate = finished_index;
+        for _ in 0..max_skips {
+            candidate = self.next_playback_index_from(candidate, false);
+            let Some(index) = candidate else {
+                self.status_message = format!("{finished_track_name} finished");
+                return Ok(());
+            };
+            match self.queue_track(index) {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    let track_name = self
+                        .tracks
+                        .get(index)
+                        .map(|t| t.name.as_str())
+                        .unwrap_or("unknown");
+                    self.status_message = format!("Skipping {track_name}: {err}");
+                }
+            }
         }
 
+        self.status_message = format!("{finished_track_name} finished, no playable track found");
         Ok(())
     }
 
