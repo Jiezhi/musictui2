@@ -8,15 +8,16 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::widgets::{
-    Block, Borders, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Tabs,
+    Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Tabs,
 };
 use ratatui::Frame;
 
 use crate::models::{PlaybackState, Repository, Track};
 
 use super::util::{
-    display_width, marquee_view, playback_state_symbol, track_page_step_for_area, volume_percent,
-    TrackListFilter, TAB_BLACKLIST, TAB_FAVORITES, TAB_TRACKS,
+    cache_icon, display_width, favorite_icon, marquee_view, playback_state_symbol,
+    track_page_step_for_area, volume_percent, TrackListFilter, TAB_BLACKLIST, TAB_FAVORITES,
+    TAB_TRACKS,
 };
 use super::PlaybackMode;
 
@@ -151,8 +152,8 @@ fn render_main_content(
 }
 
 fn render_footer(f: &mut Frame<'_>, area: Rect, data: &DrawData<'_>) {
-    let footer =
-        Paragraph::new(footer_text(data, area.width as usize)).style(Style::default().fg(Color::Gray));
+    let footer = Paragraph::new(footer_text(data, area.width as usize))
+        .style(Style::default().fg(Color::Gray));
     f.render_widget(footer, area);
 }
 
@@ -166,12 +167,25 @@ fn tracks_table(data: &DrawData<'_>) -> Table<'static> {
                 .map(|track| (track_index, track))
         })
         .map(|(track_index, track)| {
+            let is_caching = Some(track_index) == data.caching_track_index;
+            let fav_cell = if track.favorite {
+                Cell::from(favorite_icon(track)).style(Style::default().fg(Color::Red))
+            } else {
+                Cell::from(favorite_icon(track))
+            };
+            let cache_cell = if track.is_playable() {
+                Cell::from(cache_icon(track, is_caching)).style(Style::default().fg(Color::Green))
+            } else if is_caching {
+                Cell::from(cache_icon(track, is_caching)).style(Style::default().fg(Color::Yellow))
+            } else {
+                Cell::from(cache_icon(track, is_caching))
+            };
             let mut row = Row::new(vec![
-                if track.favorite { "*" } else { "" }.to_string(),
-                track.name.clone(),
-                track.format.clone(),
-                format!("{}MB", track.size / 1024 / 1024),
-                super::util::cache_label(track, Some(track_index) == data.caching_track_index),
+                fav_cell,
+                Cell::from(track.name.clone()),
+                Cell::from(track.format.clone()),
+                Cell::from(format!("{}MB", track.size / 1024 / 1024)),
+                cache_cell,
             ]);
             if Some(track_index) == data.current_track_index {
                 row = row.style(Style::default().fg(Color::Yellow));
@@ -198,16 +212,16 @@ fn tracks_table(data: &DrawData<'_>) -> Table<'static> {
     Table::new(
         rows,
         [
-            Constraint::Length(5),
-            Constraint::Percentage(50),
+            Constraint::Length(3),
+            Constraint::Percentage(55),
             Constraint::Percentage(15),
             Constraint::Percentage(15),
-            Constraint::Percentage(15),
+            Constraint::Length(7),
         ],
     )
     .block(Block::default().title(title).borders(Borders::ALL))
     .header(
-        Row::new(vec!["Fav", "Name", "Format", "Size", "Cache"])
+        Row::new(vec!["♥", "Name", "Format", "Size", "Cache"])
             .style(Style::default().fg(Color::Cyan)),
     )
     .highlight_style(Style::default().fg(Color::Yellow))

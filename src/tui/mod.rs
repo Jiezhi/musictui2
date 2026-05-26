@@ -772,11 +772,8 @@ impl App {
                                             download_handle,
                                         },
                                     };
-                                    self.status_message = pending_status(
-                                        "",
-                                        &pending,
-                                        pending.track.name.as_str(),
-                                    );
+                                    self.status_message =
+                                        pending_status("", &pending, pending.track.name.as_str());
                                     self.pending_playback = Some(pending);
                                 }
                                 Err(err) => {
@@ -851,8 +848,7 @@ impl App {
                             download_handle,
                         },
                     };
-                    self.status_message =
-                        pending_status("", &pending, pending.track.name.as_str());
+                    self.status_message = pending_status("", &pending, pending.track.name.as_str());
                     self.pending_playback = Some(pending);
                 }
             }

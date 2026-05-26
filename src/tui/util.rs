@@ -68,13 +68,21 @@ pub(super) fn initial_buffer_bytes(track: &Track) -> u64 {
     }
 }
 
-pub(super) fn cache_label(track: &Track, is_caching: bool) -> String {
+pub(super) fn cache_icon(track: &Track, is_caching: bool) -> &'static str {
     if track.is_playable() {
-        "Cached".to_string()
+        "✓"
     } else if is_caching {
-        "Caching".to_string()
+        "↓"
     } else {
-        "-".to_string()
+        ""
+    }
+}
+
+pub(super) fn favorite_icon(track: &Track) -> &'static str {
+    if track.favorite {
+        "♥"
+    } else {
+        ""
     }
 }
 
