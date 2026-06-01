@@ -91,6 +91,36 @@ pub(super) fn track_page_step_for_area(area: Rect) -> usize {
     usize::from(area.height.saturating_sub(3).max(1))
 }
 
+/// Width budget for the `Name` column inside [`tracks_table`].
+///
+/// The table block consumes 2 cells for borders, plus 1 cell of
+/// column spacing between each of the 5 columns (4 gaps), plus the
+/// fixed widths of the favorite (3) and cache (7) columns. The Name
+/// column then gets 55% of the remaining percentage budget.
+pub(super) fn track_name_column_width(area: Rect) -> usize {
+    let inner = usize::from(area.width.saturating_sub(2));
+    let after_spacing = inner.saturating_sub(4);
+    let after_fixed = after_spacing.saturating_sub(3 + 7);
+    after_fixed * 55 / 100
+}
+
+const AUDIO_EXTENSIONS: &[&str] = &["mp3", "flac", "wav", "m4a", "ogg", "aac", "opus", "wma"];
+
+/// Strips a trailing audio file extension from a track name for
+/// display purposes. The stored name is left untouched.
+pub(super) fn display_track_name(name: &str) -> &str {
+    if let Some(dot_pos) = name.rfind('.') {
+        let ext = &name[dot_pos + 1..];
+        if AUDIO_EXTENSIONS
+            .iter()
+            .any(|known| ext.eq_ignore_ascii_case(known))
+        {
+            return &name[..dot_pos];
+        }
+    }
+    name
+}
+
 pub(super) fn normalize_search_text(value: &str) -> String {
     value
         .chars()
@@ -456,5 +486,29 @@ mod tests {
     #[test]
     fn marquee_returns_empty_when_no_budget() {
         assert_eq!(marquee_view("anything", 0, 0), "");
+    }
+
+    #[test]
+    fn display_track_name_strips_known_audio_extensions() {
+        assert_eq!(display_track_name("song.mp3"), "song");
+        assert_eq!(display_track_name("Song.MP3"), "Song");
+        assert_eq!(display_track_name("song.flac"), "song");
+        assert_eq!(display_track_name("song.opus"), "song");
+        assert_eq!(display_track_name("中文歌曲.m4a"), "中文歌曲");
+    }
+
+    #[test]
+    fn display_track_name_keeps_non_audio_suffixes_and_dotless_names() {
+        assert_eq!(display_track_name("song"), "song");
+        assert_eq!(display_track_name("song.txt"), "song.txt");
+        assert_eq!(display_track_name("v1.0.song.mp3"), "v1.0.song");
+    }
+
+    #[test]
+    fn track_name_column_width_reserves_space_for_borders_spacing_and_fixed_columns() {
+        // 80 wide: inner=78, after spacing(4)=74, after fixed(10)=64, *55/100=35.
+        assert_eq!(track_name_column_width(Rect::new(0, 0, 80, 20)), 35);
+        // Saturating: very narrow area returns 0 without underflow.
+        assert_eq!(track_name_column_width(Rect::new(0, 0, 4, 20)), 0);
     }
 }

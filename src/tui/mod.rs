@@ -25,8 +25,8 @@ use tokio::task::JoinHandle;
 
 use draw::{render_frame, DrawData};
 use util::{
-    filtered_track_indices, initial_buffer_bytes, next_repository_index, next_track_index,
-    previous_repository_index, previous_track_index, sequential_autoplay_index,
+    display_track_name, filtered_track_indices, initial_buffer_bytes, next_repository_index,
+    next_track_index, previous_repository_index, previous_track_index, sequential_autoplay_index,
     should_handle_key_event, shuffle_autoplay_index, track_list_filter_for_tab, volume_percent,
     TrackListFilter, DEFAULT_TRACKS_PAGE_STEP, TAB_BLACKLIST, TAB_COUNT, TAB_REPOSITORIES,
 };
@@ -566,7 +566,7 @@ impl App {
                     self.status_message = self
                         .audio_player
                         .get_current_track()
-                        .map(|t| t.name.clone())
+                        .map(|t| display_track_name(&t.name).to_string())
                         .unwrap_or_default();
                 } else if self.selected_tab_can_play_tracks() {
                     if let Some(index) = self.current_track_index {
@@ -654,7 +654,8 @@ impl App {
             let track = self.tracks[index].clone();
 
             if track.blacklisted {
-                self.status_message = format!("Restore {} before playing", track.name);
+                self.status_message =
+                    format!("Restore {} before playing", display_track_name(&track.name));
                 return Ok(());
             }
 
@@ -663,7 +664,7 @@ impl App {
                     pending.cancel();
                 }
                 self.audio_player.load_local_track(track.clone())?;
-                self.status_message = track.name.clone();
+                self.status_message = display_track_name(&track.name).to_string();
                 return Ok(());
             }
 
@@ -714,7 +715,7 @@ impl App {
                     decoder_handle,
                 },
             });
-            self.status_message = format!("Buffering {}", track.name);
+            self.status_message = format!("Buffering {}", display_track_name(&track.name));
         }
         Ok(())
     }
@@ -730,7 +731,7 @@ impl App {
             }
         } else if self.audio_player.is_playing() {
             if let Some(track) = self.audio_player.get_current_track() {
-                self.status_message = track.name.clone();
+                self.status_message = display_track_name(&track.name).to_string();
             }
         }
 
@@ -772,8 +773,11 @@ impl App {
                                             download_handle,
                                         },
                                     };
-                                    self.status_message =
-                                        pending_status("", &pending, pending.track.name.as_str());
+                                    self.status_message = pending_status(
+                                        "",
+                                        &pending,
+                                        display_track_name(pending.track.name.as_str()),
+                                    );
                                     self.pending_playback = Some(pending);
                                 }
                                 Err(err) => {
@@ -804,8 +808,11 @@ impl App {
                             decoder_handle,
                         },
                     };
-                    self.status_message =
-                        pending_status("Buffering", &pending, pending.track.name.as_str());
+                    self.status_message = pending_status(
+                        "Buffering",
+                        &pending,
+                        display_track_name(pending.track.name.as_str()),
+                    );
                     self.pending_playback = Some(pending);
                 }
             }
@@ -825,9 +832,11 @@ impl App {
                             }
 
                             if self.audio_player.is_playing() {
-                                self.status_message = format!("{} | Cached", track.name);
+                                self.status_message =
+                                    format!("{} | Cached", display_track_name(&track.name));
                             } else {
-                                self.status_message = format!("Cached {}", track.name);
+                                self.status_message =
+                                    format!("Cached {}", display_track_name(&track.name));
                             }
                         }
                         Ok(Err(err)) => {
@@ -848,7 +857,11 @@ impl App {
                             download_handle,
                         },
                     };
-                    self.status_message = pending_status("", &pending, pending.track.name.as_str());
+                    self.status_message = pending_status(
+                        "",
+                        &pending,
+                        display_track_name(pending.track.name.as_str()),
+                    );
                     self.pending_playback = Some(pending);
                 }
             }

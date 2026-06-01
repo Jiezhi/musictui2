@@ -16,8 +16,8 @@ use crate::models::{PlaybackState, Repository, Track};
 
 use super::util::{
     cache_icon, display_width, favorite_icon, marquee_view, playback_state_symbol,
-    track_page_step_for_area, volume_percent, TrackListFilter, TAB_BLACKLIST, TAB_FAVORITES,
-    TAB_TRACKS,
+    track_name_column_width, track_page_step_for_area, volume_percent, TrackListFilter,
+    TAB_BLACKLIST, TAB_FAVORITES, TAB_TRACKS,
 };
 use super::PlaybackMode;
 
@@ -145,7 +145,7 @@ fn render_main_content(
         }
         TAB_TRACKS | TAB_FAVORITES | TAB_BLACKLIST => {
             tracks_table_state.select(data.current_track_row_index);
-            f.render_stateful_widget(tracks_table(data), area, tracks_table_state);
+            f.render_stateful_widget(tracks_table(data, area), area, tracks_table_state);
         }
         _ => {}
     }
@@ -157,7 +157,8 @@ fn render_footer(f: &mut Frame<'_>, area: Rect, data: &DrawData<'_>) {
     f.render_widget(footer, area);
 }
 
-fn tracks_table(data: &DrawData<'_>) -> Table<'static> {
+fn tracks_table(data: &DrawData<'_>, area: Rect) -> Table<'static> {
+    let name_column_width = track_name_column_width(area);
     let rows: Vec<Row<'static>> = data
         .visible_track_indices
         .iter()
@@ -180,14 +181,20 @@ fn tracks_table(data: &DrawData<'_>) -> Table<'static> {
             } else {
                 Cell::from(cache_icon(track, is_caching))
             };
+            let is_selected = Some(track_index) == data.current_track_index;
+            let name_text = if is_selected && name_column_width > 0 {
+                marquee_view(&track.name, data.marquee_offset, name_column_width)
+            } else {
+                track.name.clone()
+            };
             let mut row = Row::new(vec![
                 fav_cell,
-                Cell::from(track.name.clone()),
+                Cell::from(name_text),
                 Cell::from(track.format.clone()),
                 Cell::from(format!("{}MB", track.size / 1024 / 1024)),
                 cache_cell,
             ]);
-            if Some(track_index) == data.current_track_index {
+            if is_selected {
                 row = row.style(Style::default().fg(Color::Yellow));
             }
             row
