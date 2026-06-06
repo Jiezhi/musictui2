@@ -15,9 +15,9 @@ use ratatui::Frame;
 use crate::models::{PlaybackState, Repository, Track};
 
 use super::util::{
-    cache_icon, display_width, favorite_icon, marquee_view, playback_state_symbol,
-    track_name_column_width, track_page_step_for_area, volume_percent, TrackListFilter,
-    TAB_BLACKLIST, TAB_FAVORITES, TAB_TRACKS,
+    cache_icon, display_track_name, display_width, favorite_icon, marquee_view,
+    playback_state_symbol, track_name_column_width, track_page_step_for_area, volume_percent,
+    TrackListFilter, TAB_BLACKLIST, TAB_FAVORITES, TAB_TRACKS,
 };
 use super::PlaybackMode;
 
@@ -182,10 +182,11 @@ fn tracks_table(data: &DrawData<'_>, area: Rect) -> Table<'static> {
                 Cell::from(cache_icon(track, is_caching))
             };
             let is_selected = Some(track_index) == data.current_track_index;
+            let display_name = display_track_name(&track.name);
             let name_text = if is_selected && name_column_width > 0 {
-                marquee_view(&track.name, data.marquee_offset, name_column_width)
+                marquee_view(display_name, data.marquee_offset, name_column_width)
             } else {
-                track.name.clone()
+                display_name.to_string()
             };
             let mut row = Row::new(vec![
                 fav_cell,
