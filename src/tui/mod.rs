@@ -523,14 +523,14 @@ impl App {
                 }
                 self.pending_repository_delete = None;
             }
-            KeyCode::Char('.')
+            KeyCode::Char('.' | '。')
                 if self.selected_tab_can_play_tracks()
                     && !self.visible_track_indices.is_empty() =>
             {
                 self.play_next_track()?;
                 self.pending_repository_delete = None;
             }
-            KeyCode::Char(',')
+            KeyCode::Char(',' | '，')
                 if self.selected_tab_can_play_tracks()
                     && !self.visible_track_indices.is_empty() =>
             {
@@ -984,6 +984,12 @@ impl App {
         let blacklisted = !track.blacklisted;
         self.database.set_track_blacklisted(track.id, blacklisted)?;
 
+        let was_current_playing = blacklisted
+            && self
+                .audio_player
+                .get_current_track()
+                .is_some_and(|current_track| current_track.id == track.id);
+
         if let Some(stored_track) = self.selected_track_mut() {
             stored_track.blacklisted = blacklisted;
             if blacklisted {
@@ -992,11 +998,7 @@ impl App {
         }
 
         if blacklisted {
-            if self
-                .audio_player
-                .get_current_track()
-                .is_some_and(|current_track| current_track.id == track.id)
-            {
+            if was_current_playing {
                 self.audio_player.stop()?;
             }
 
@@ -1015,6 +1017,21 @@ impl App {
         } else {
             format!("Restored {}", track.name)
         };
+
+        if was_current_playing {
+            let finished_index = self.tracks.iter().position(|t| t.id == track.id);
+            let max_skips = self.active_playback_indices().len().max(1);
+            let mut candidate = finished_index;
+            for _ in 0..max_skips {
+                candidate = self.next_playback_index_from(candidate, false);
+                let Some(next_index) = candidate else {
+                    break;
+                };
+                if self.queue_track(next_index).is_ok() {
+                    break;
+                }
+            }
+        }
 
         Ok(())
     }

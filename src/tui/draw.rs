@@ -281,7 +281,7 @@ f: Toggle favorite on selected track\n\
 x: Toggle blacklist on selected track\n\
 Space: Play or pause\n\
 m: Toggle playback mode\n\
-, / .: Previous / next track\n\
+, / . (or ，/。): Previous / next track\n\
 d: Delete selected repository (press twice)\n\
 + / -: Volume\n\
 q: Quit"
